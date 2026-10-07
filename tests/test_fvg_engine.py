@@ -192,7 +192,7 @@ def make_engine(tmp_path, armed=False, name="f"):
     journal = ExecutionJournal(tmp_path / f"{name}-journal.sqlite")
     _, _, tc = scenario()
     broker = ArmedBroker(tc + 3 * M5 + timedelta(seconds=1))
-    pol = ExecutionPolicy(True, 10.0, 77, "mt5", META.name, CFG.version)
+    pol = ExecutionPolicy(True, 10.0, 77, "mt5", META.name, CFG.version, account_server="Test-Server")
     alerts = []
     eng = FvgLiveEngine(CFG, META, fstore, events, "mt5", alert_fn=alerts.append,
                         executor_fn=(lambda: (MT5FvgExecutor(lambda: broker, journal, pol), "ON")) if armed
@@ -352,7 +352,7 @@ def scanner(tmp_path, bars, now, armed):
     settings = Settings()
     feed = FakeFeed(bars, now)
     broker = ArmedBroker(now)
-    pol = ExecutionPolicy(True, 10.0, 77, "mt5", META.name, CFG.version)
+    pol = ExecutionPolicy(True, 10.0, 77, "mt5", META.name, CFG.version, account_server="Test-Server")
 
     def executor_fn():
         broker.set_quote(feed.now(), 120.2, 120.2 + feed.spread)
@@ -515,30 +515,48 @@ def drive_q(bars, eng, spread, delay_s=1):
         eng.process_bar(bars, i, quote_fn(spread), b.close_time + timedelta(seconds=delay_s))
 
 
-def test_rule6_wide_spread_rejects_before_any_basket_alert_or_capacity(tmp_path):
+def test_rule6_codex_example_spread_033_rejects_before_any_basket_alert_or_capacity(tmp_path):
+    # Codex reproduction: BUY FVG [116.60, 117.80], 80% entry 116.84, SL 116.58 -> stop distance 0.26 < 0.33 + 0.01
     bars, _, _ = scenario()
     eng, fstore, broker, alerts, journal = make_engine(tmp_path, armed=True)
-    drive_q(bars, eng, spread=0.20)  # 80% leg stop distance 0.26 < 2 x 0.20
+    drive_q(bars, eng, spread=0.33)
     assert fstore.baskets() == [] and alerts == [] and broker.requests == [] and journal.rows() == []
-    (s,) = [x for x in fstore.list_setups() if x.status == "rejected" and (x.reason or "").startswith("stop_within_spread")]
-    assert "leg 3" in s.reason
+    (s,) = [x for x in fstore.list_setups() if (x.reason or "").startswith("stop_within_spread")]
+    assert "leg 3" in s.reason and s.status == "rejected"
     eng2, fstore2, broker2, alerts2, _ = make_engine(tmp_path, armed=True, name="ok")
-    drive_q(bars, eng2, spread=0.05)
+    drive_q(bars, eng2, spread=0.25)  # 0.26 >= 0.25 + 0.01: equality at the minimum passes
     assert len(broker2.requests) == 3 and len(alerts2) == 1
+
+
+def test_rule6_boundary_and_sell_symmetry():
+    from app.fvg import stop_within_spread
+    sl, legs = basket_levels(NS(direction=BUY, bottom=116.6, top=117.8), META, CFG)
+    entries = [(l.number, l.entry) for l in legs]
+    assert stop_within_spread(sl, entries, 0.25, CFG, 0.01) is None          # 0.26 == 0.25 + 0.01
+    assert "leg 3" in stop_within_spread(sl, entries, 0.26, CFG, 0.01)       # 0.26 < 0.27
+    sl2, legs2 = basket_levels(NS(direction="SELL", bottom=116.6, top=117.8), META, CFG)
+    entries2 = [(l.number, l.entry) for l in legs2]
+    assert stop_within_spread(sl2, entries2, 0.25, CFG, 0.01) is None and stop_within_spread(sl2, entries2, 0.33, CFG, 0.01)
+    wide_sl, wide = basket_levels(NS(direction=BUY, bottom=110.0, top=117.8), META, CFG)  # an eligible wider gap
+    assert stop_within_spread(wide_sl, [(l.number, l.entry) for l in wide], 0.33, CFG, 0.01) is None
 
 
 def test_rule6_executor_backstop_on_the_send_time_quote(tmp_path):
     bars, _, _ = scenario()
     eng, fstore, broker, alerts, journal = make_engine(tmp_path, armed=True)
-    broker.ticks = [NS(bid=120.2, ask=120.4, time=t.time, time_msc=t.time_msc) for t in broker.ticks]  # spread widened
+    broker.ticks = [NS(bid=120.2, ask=120.53, time=t.time, time_msc=t.time_msc) for t in broker.ticks]  # 0.33 at send
     drive_q(bars, eng, spread=0.05)  # the engine's quote was fine; the broker quote at send time is not
     (b,) = fstore.baskets()
     assert broker.requests == [] and b["status"] == "preflight_rejected" and "spread" in b["execution"]["reason"]
 
 
-def test_rule6_in_replay():
-    r = run([(120.1, 120.1, 117.5, 118.0)] + flat(118.0, 3), costs=Costs(0.20, 0.05))
+def test_rule6_in_replay_spread_and_wrong_side_placement():
+    r = run([(120.1, 120.1, 117.5, 118.0)] + flat(118.0, 3), costs=Costs(0.33, 0.05))
     assert r["baskets"] == [] and r["setup_reasons"].get("stop_within_spread") == 1
+    from app.fvg import placement_violation
+    assert placement_violation(BUY, [(1, 117.78)], 117.70, 117.75, 0.01)           # Ask already below the limit
+    assert placement_violation(BUY, [(1, 117.78)], 117.70, 117.79, 0.01) is None   # rests 1 tick below the Ask
+    assert placement_violation("SELL", [(1, 116.62)], 116.65, 116.70, 0.01)        # Bid already above the limit
 
 
 def test_far_edge_cancel_runs_while_paused_and_is_not_skipped_by_resume(tmp_path):
@@ -591,8 +609,8 @@ def test_other_account_is_logged_once_and_not_counted_until_it_returns(tmp_path)
         eng.reconcile(t + timedelta(seconds=5 * k))
     (b,) = fstore.baskets()
     from app.fvg_live import basket_is_open
-    assert b["other_account"] is True and not basket_is_open(b, t)
-    warnings = [e for e in eng.events.list_events(100) if "another MT5 account" in e["message"]]
+    assert "another MT5 server/login" in b["other_account"] and not basket_is_open(b, t)
+    warnings = [e for e in eng.events.list_events(100) if "another MT5 server/login" in e["message"]]
     assert len(warnings) == 1
     broker.account.login = LOGIN
     eng.reconcile(t + timedelta(minutes=1))
@@ -614,3 +632,53 @@ def test_quote_age_uses_the_real_clock_not_the_scan_start(tmp_path):
     broker2 = Broker()
     ex2 = MT5FvgExecutor(lambda: broker2, ExecutionJournal(tmp_path / "b.sqlite"), policy(), clock=lambda: T)
     assert ex2.submit("p2", gap, M, old_scan_start, T + timedelta(hours=2))["state"] == "submitted"
+
+
+# ------------------------------------------------------------------ default ON for demo accounts (user request 2026-10-07)
+def _ws(tmp_path, default_on=True):
+    from app.fvg_execution import ExecutionOptIn
+    return NS(fvg_optin=ExecutionOptIn(tmp_path / "optin.json"), fvg_user_off=tmp_path / "off.json",
+              _fvg_binding=lambda a: {"source": "mt5", "symbol": "XAUUSD", "account": str(a.login), "strategy_version": "v"},
+              _fvg_default_on_demo=lambda: default_on, fvg_status=lambda: {})
+
+
+MT5C = NS(ACCOUNT_TRADE_MODE_DEMO=0)
+
+
+def test_demo_accounts_are_on_by_default_including_after_an_account_switch(tmp_path):
+    from app.web import Workstation
+    ws = _ws(tmp_path)
+    assert Workstation._fvg_armed(ws, NS(login=1, trade_mode=0), MT5C) == (True, None, "default (demo account)")
+    assert Workstation._fvg_armed(ws, NS(login=2, trade_mode=0), MT5C)[0] is True  # another demo account: still ON
+
+
+def test_real_and_contest_accounts_are_never_on_by_default(tmp_path):
+    from app.web import Workstation
+    ws = _ws(tmp_path)
+    for mode, word in ((1, "contest account"), (2, "real-money account"), (None, "account type unknown"), (7, "account type unknown")):
+        on, why, _ = Workstation._fvg_armed(ws, NS(login=1, trade_mode=mode), MT5C)
+        assert on is False and word in why
+    ws.fvg_optin.arm(ws._fvg_binding(NS(login=7)), T0)  # an explicit arming for THAT real account still works
+    assert Workstation._fvg_armed(ws, NS(login=7, trade_mode=2), MT5C) == (True, None, "you")
+    assert Workstation._fvg_armed(ws, NS(login=8, trade_mode=2), MT5C)[0] is False
+
+
+def test_explicit_off_beats_the_default_until_turned_on_again(tmp_path):
+    from app.web import Workstation
+    ws = _ws(tmp_path)
+    Workstation.fvg_arm(ws, False)  # the user's Turn OFF
+    assert ws.fvg_user_off.exists()
+    assert Workstation._fvg_armed(ws, NS(login=1, trade_mode=0), MT5C) == (False, "turned OFF by you", None)
+    assert Workstation._fvg_armed(ws, NS(login=2, trade_mode=0), MT5C)[0] is False  # also after an account switch
+    ws.fvg_user_off.unlink()  # what a successful Turn ON does
+    assert Workstation._fvg_armed(ws, NS(login=1, trade_mode=0), MT5C)[0] is True
+
+
+def test_no_default_when_the_setting_is_off_or_missing(tmp_path):
+    from app.web import Workstation
+    ws = _ws(tmp_path, default_on=False)
+    assert Workstation._fvg_armed(ws, NS(login=1, trade_mode=0), MT5C) == (False, "not armed", None)
+    real = Workstation._fvg_default_on_demo(NS(fvg_execution_path=tmp_path / "missing.json"))
+    assert real is False
+    (tmp_path / "bad.json").write_text('{"default_on_for_demo_accounts": "yes"}', encoding="utf-8")
+    assert Workstation._fvg_default_on_demo(NS(fvg_execution_path=tmp_path / "bad.json")) is False

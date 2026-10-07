@@ -113,5 +113,7 @@ def aggregate(m5: list[Bar], tf: timedelta = H1) -> list[Bar]:
         g = sorted(groups[start], key=lambda b: b.open_time)
         if len(g) != per or g[0].open_time != start or not contiguous(g):
             continue
+        if any(b.tf != M5 or not b.is_valid() for b in g):
+            continue  # one invalid/non-M5 constituent voids the whole group; the gap breaks contiguous runs/warm-up
         out.append(Bar(start, tf, g[0].open, max(b.high for b in g), min(b.low for b in g), g[-1].close))
     return out

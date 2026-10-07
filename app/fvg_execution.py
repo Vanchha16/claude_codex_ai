@@ -42,7 +42,11 @@ TERMINAL_LEG_STATES = {"rejected", "cancelled", "expired", "closed_tp", "closed_
 
 
 class OtherAccountError(ValueError):
-    """The terminal is logged into a different account than the one this plan was submitted on."""
+    """The terminal is logged into a different account/server than the one this plan was submitted on."""
+
+
+class UnverifiableAccountError(OtherAccountError):
+    """A legacy journal without server identity: ownership cannot be proven on any connected account."""
 
 
 def const(mt5, name: str) -> int:
@@ -51,8 +55,15 @@ def const(mt5, name: str) -> int:
 
 
 def account_fp(login) -> str:
-    """Account identity without storing/printing the login number."""
+    """LEGACY login-only fingerprint (pre 20261007-161242). Never accepted as consent or ownership proof any more."""
     return hashlib.sha256(f"mt5-login:{login}".encode()).hexdigest()[:12]
+
+
+def account_id(account) -> str:
+    """Canonical account identity = trade SERVER + login, hashed so the login is never stored or shown. The same login
+    on another server is another account (consent, journals, submission, reconciliation and cancellation)."""
+    server, login = getattr(account, "server", None), getattr(account, "login", None)
+    return "srv1-" + hashlib.sha256(f"mt5-account:{server}|{login}".encode()).hexdigest()[:16]
 
 
 def plan_id_for(setup_key: str) -> str:
@@ -72,14 +83,15 @@ class ExecutionPolicy:
     source: Optional[str] = None
     symbol: Optional[str] = None
     strategy_version: Optional[str] = None
+    account_server: Optional[str] = None   # the trade server of the explicitly bound account (with account_login)
 
     def validate(self) -> "ExecutionPolicy":
         if self.risk_usd is not None and (isinstance(self.risk_usd, bool) or not isinstance(self.risk_usd, (int, float))
                                           or not math.isfinite(self.risk_usd) or self.risk_usd <= 0):
             raise ValueError("risk_usd must be a positive finite USD amount")
-        if self.enabled and (self.risk_usd is None or self.account_login is None or not self.symbol
-                             or self.source != "mt5" or not self.strategy_version):
-            raise ValueError("automatic execution needs a risk budget and an explicit mt5/symbol/account/version binding")
+        if self.enabled and (self.risk_usd is None or self.account_login is None or not self.account_server
+                             or not self.symbol or self.source != "mt5" or not self.strategy_version):
+            raise ValueError("automatic execution needs a risk budget and an explicit mt5/symbol/server+login/version binding")
         return self
 
 
@@ -184,8 +196,8 @@ class MT5FvgExecutor:
         terminal, account, info, tick = mt5.terminal_info(), mt5.account_info(), mt5.symbol_info(symbol), mt5.symbol_info_tick(symbol)
         if any(x is None for x in (terminal, account, info, tick)):
             raise ValueError("MT5 trading context is unavailable")
-        if account.login != self.policy.account_login:
-            raise ValueError("MT5 account differs from the explicitly bound account")
+        if account.login != self.policy.account_login or getattr(account, "server", None) != self.policy.account_server:
+            raise ValueError("MT5 account/server differs from the explicitly bound server+login")
         tb = self.timebase_fn()
         if tb.server is not None and getattr(account, "server", None) != tb.server:
             raise ValueError("MT5 trade server differs from the server whose time base is in use")
@@ -225,17 +237,37 @@ class MT5FvgExecutor:
                 raise ValueError(f"leg {leg.number}: limit/SL/TP violates the broker distance rules at the current quote")
 
     @staticmethod
-    def _check_spread_room(plan, tick, multiple: float) -> None:
-        """Rule 6 backstop on the actual broker quote: a stop closer than multiple x spread is hit at the fill."""
+    def _check_spread_room(plan, tick, margin_ticks: int, tick_size: float) -> None:
+        """Rule 6a on the actual broker quote: every stop >= spread + margin ticks from its entry (equality passes)."""
         spread = tick.ask - tick.bid
+        need = spread + margin_ticks * tick_size
         for leg in plan:
-            if abs(leg.entry - leg.sl) + 1e-9 < multiple * spread:
-                raise ValueError(f"leg {leg.number}: stop distance {abs(leg.entry - leg.sl):.2f} is below {multiple:g} x "
-                                 f"the current spread {spread:.2f}; basket rejected")
+            distance = abs(leg.entry - leg.sl)
+            if distance + tick_size * 1e-6 < need:
+                raise ValueError(f"leg {leg.number}: stop distance {distance:.2f} is below spread {spread:.2f} + "
+                                 f"{margin_ticks} tick(s); whole basket rejected")
+
+    @staticmethod
+    def _ineligible(eligibility: Optional[dict], at: datetime, expires: datetime) -> Optional[str]:
+        """Decision context carried from the engine, re-checked with the CURRENT clock at every send boundary."""
+        if at >= expires:
+            return "the pending-order lifetime has already passed"
+        if not eligibility:
+            return None
+        age = (at - eligibility["confirm_close"]).total_seconds()
+        if age < 0:
+            return "the confirmation is in the future"
+        if at >= eligibility["setup_expires"]:
+            return "the setup has expired"
+        if age > eligibility["max_age_seconds"]:
+            return f"the confirmation is {age:.0f}s old (> {eligibility['max_age_seconds']}s)"
+        return None
 
     def submit(self, plan_id: str, gap: Gap, meta: SymbolMeta, now: datetime, expires: datetime, *,
-               min_stop_spread_multiple: float = 2.0) -> dict:
-        """Automatic submission of one basket. Never retried after a journal row exists (idempotent)."""
+               stop_spread_margin_ticks: int = 1, eligibility: Optional[dict] = None) -> dict:
+        """Automatic submission of one basket. Never retried after a journal row exists (idempotent).
+        eligibility = {"confirm_close", "setup_expires", "max_age_seconds"}: checked with the current clock before
+        preflight, after preflight and immediately before EVERY send; stale context sends nothing new."""
         if not self.policy.enabled:
             return {"state": "disabled", "reason": "automatic execution is OFF; no orders submitted"}
         if self.policy.risk_usd is None:
@@ -251,6 +283,9 @@ class MT5FvgExecutor:
                 return old  # includes unknown/in-progress states after a restart: never resend
             if expires <= now or now.tzinfo is None or expires.tzinfo is None:
                 raise ValueError("pending-order expiry must be in the future, in UTC")
+            why = self._ineligible(eligibility, clock_now(), expires)
+            if why:
+                raise ValueError(f"no longer eligible: {why}")
             account, info, tick = self._context(meta.name, clock_now())
             mt5 = self.mt5
             cash = account_cash_risk(self.policy.risk_usd, getattr(account, "currency", ""))
@@ -271,7 +306,7 @@ class MT5FvgExecutor:
                 raise ValueError("broker does not support a specified pending-order expiry")
             filling = mt5.ORDER_FILLING_RETURN  # pending orders: RETURN regardless of the market filling flags
             self._check_distances(plan, info, tick, broker_meta.tick_size)
-            self._check_spread_room(plan, tick, min_stop_spread_multiple)
+            self._check_spread_room(plan, tick, stop_spread_margin_ticks, broker_meta.tick_size)
             requests, margin = [], 0.0
             for leg in plan:
                 buy = leg.direction == BUY
@@ -294,8 +329,12 @@ class MT5FvgExecutor:
             # Immediately before the first send: re-read account/exposure AND re-validate the limits on the fresh quote.
             _, info2, tick2 = self._context(meta.name, clock_now())
             self._check_distances(plan, info2, tick2, broker_meta.tick_size)
-            self._check_spread_room(plan, tick2, min_stop_spread_multiple)
-            payload = {"plan_id": plan_id, "symbol": meta.name, "account_fp": account_fp(account.login),
+            self._check_spread_room(plan, tick2, stop_spread_margin_ticks, broker_meta.tick_size)
+            why = self._ineligible(eligibility, clock_now(), expires)  # a slow preflight can age the confirmation
+            if why:
+                raise ValueError(f"no longer eligible after preflight: {why}")
+            payload = {"plan_id": plan_id, "symbol": meta.name, "account_id": account_id(account),
+                       "account_server": getattr(account, "server", None),
                        "account_currency": getattr(account, "currency", ""), "state": "prepared",
                        "expires": expires.isoformat(), "created_at": now.isoformat(),
                        "time_base": self.timebase_fn().to_dict(), "risk_usd": self.policy.risk_usd,
@@ -307,6 +346,14 @@ class MT5FvgExecutor:
             accepted = {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED}
             for i, request in enumerate(requests):
                 leg = payload["legs"][i]
+                why = self._ineligible(eligibility, clock_now(), expires)
+                if why:  # immediately before THIS send: stale context never sends; accepted legs stay reconciled
+                    for rest in payload["legs"][i:]:
+                        rest["state"] = "not_sent"
+                    payload["state"] = "partial" if i else "rejected"
+                    payload["reason"] = f"stopped before leg {leg['number']}: {why}"
+                    self.journal.save(plan_id, payload)
+                    return payload
                 leg["state"], payload["state"] = "sending", "submitting"
                 self.journal.save(plan_id, payload)  # written BEFORE order_send: a crash leaves "sending" = unknown
                 try:
@@ -333,9 +380,24 @@ class MT5FvgExecutor:
             return payload
 
     # ---------------------------------------------------------------- after submission
+    FINAL_LEG_STATES = {"prepared", "not_sent", "rejected", "closed_tp", "closed_sl", "closed_other"}
+    SETTLE_SECONDS = 60  # a basket is closed only after its terminal state was seen twice, >= 60 s apart
+
     def _owned(self, x, payload, leg) -> bool:
         return (getattr(x, "symbol", None) == payload["symbol"] and getattr(x, "magic", None) == MAGIC and
                 (x.ticket == leg["ticket"] if leg.get("ticket") else getattr(x, "comment", "") == leg["comment"]))
+
+    def _now(self) -> datetime:
+        return self.clock() if self.clock else datetime.now(timezone.utc)
+
+    @staticmethod
+    def _check_owner(account, payload) -> None:
+        """Ownership = the ORIGINAL server+login recorded before any send; legacy journals cannot prove it."""
+        if "account_id" not in payload:
+            raise UnverifiableAccountError("legacy execution journal without server identity: ownership cannot be "
+                                           "verified on any account; left unresolved for manual review")
+        if account is None or account_id(account) != payload["account_id"]:
+            raise OtherAccountError("the connected MT5 server+login is not the account this plan was submitted on")
 
     def reconcile(self, plan_id: str, now: datetime) -> Optional[dict]:
         """Read broker state after submission/restart; never resubmits or guesses. Broker results are real outcomes,
@@ -347,105 +409,135 @@ class MT5FvgExecutor:
             mt5 = self.mt5
             if mt5 is None:
                 return payload
-            account = mt5.account_info()
-            if account is None or account_fp(account.login) != payload["account_fp"]:
-                raise OtherAccountError("cannot reconcile on another account")
-            # broker time base, with a wide margin: a mis-set or changed offset must never hide this plan's deals
-            # (rows are matched by ticket/comment/magic, so the wider window cannot adopt foreign records)
-            tb = self.timebase_fn()
-            start = tb.to_broker(datetime.fromisoformat(payload["created_at"])) - timedelta(days=1)
-            end = tb.to_broker(now) + timedelta(days=1)
-            pending = mt5.orders_get(symbol=payload["symbol"])
-            positions = mt5.positions_get(symbol=payload["symbol"])
-            history = mt5.history_orders_get(start, end)
-            deals = mt5.history_deals_get(start, end)
-            if pending is None or positions is None or history is None or deals is None:
-                return payload  # cannot read now: keep the last known states
-            states = {mt5.ORDER_STATE_PLACED: "pending", mt5.ORDER_STATE_STARTED: "pending",
-                      mt5.ORDER_STATE_CANCELED: "cancelled", mt5.ORDER_STATE_EXPIRED: "expired",
-                      mt5.ORDER_STATE_REJECTED: "rejected", mt5.ORDER_STATE_PARTIAL: "partially_filled"}
-            out_entries = {mt5.DEAL_ENTRY_OUT, getattr(mt5, "DEAL_ENTRY_OUT_BY", 3)}
-            open_ids = {getattr(p, "identifier", getattr(p, "ticket", None)) for p in positions}
-            for leg in payload["legs"]:
-                if leg["state"] in ("prepared", "not_sent") or leg["state"] in TERMINAL_LEG_STATES:
-                    continue
-                live = [x for x in pending if self._owned(x, payload, leg)]
-                past = [x for x in history if self._owned(x, payload, leg)]
-                if len(live) + len(past) > 1 and not leg.get("ticket"):
-                    leg["note"] = "several matching orders; needs manual review"
-                    continue
-                order = (live or past or [None])[0]
-                if order is None:
-                    continue  # unknown stays unknown; no resend
-                leg["ticket"] = order.ticket
-                # every fill of THIS order (a partial fill may be followed by more fills, expiry or cancellation)
-                ins = [d for d in deals if getattr(d, "order", None) == order.ticket and d.entry == mt5.DEAL_ENTRY_IN]
-                pos_ids = {d.position_id for d in ins if getattr(d, "position_id", None)}
-                if not pos_ids and order.state in (mt5.ORDER_STATE_FILLED, mt5.ORDER_STATE_PARTIAL):
-                    pos_ids = {getattr(order, "position_id", 0) or order.ticket}
-                filled = round(sum(getattr(d, "volume", 0.0) for d in ins), 8)
-                if not ins and order.state == mt5.ORDER_STATE_FILLED:
-                    filled = getattr(order, "volume_initial", None)
-                remaining = getattr(live[0], "volume_current", None) if live else 0.0
-                leg["filled_volume"], leg["pending_volume"] = filled, remaining
-                if not pos_ids:
-                    leg["state"] = "pending" if live else states.get(order.state, "unknown")
-                    continue
-                leg["position_id"] = sorted(pos_ids)[0] if len(pos_ids) == 1 else sorted(pos_ids)
-                if live:  # filled volume open AND a pending remainder still resting at the broker
-                    leg["state"] = "partially_filled"
-                    continue
-                if order.state != mt5.ORDER_STATE_FILLED:
-                    leg["remainder"] = states.get(order.state, "unknown")  # e.g. partial fill, remainder expired
-                pos_deals = [d for d in deals if getattr(d, "position_id", None) in pos_ids]
-                closes = [d for d in pos_deals if d.entry in out_entries]
-                if pos_ids & open_ids or not closes:
-                    leg["state"] = "filled_open"
-                    continue
-                # actual broker result: every deal of the position(s), entry-side commission/fees included
-                leg["broker_pnl"] = round(sum(getattr(x, "profit", 0.0) + getattr(x, "commission", 0.0) + getattr(x, "swap", 0.0)
-                                              + getattr(x, "fee", 0.0) for x in pos_deals), 2)
-                leg["exit_price"] = closes[-1].price
-                reasons = {d.reason for d in closes}
-                leg["state"] = ("closed_tp" if reasons == {mt5.DEAL_REASON_TP} else
-                                "closed_sl" if reasons == {mt5.DEAL_REASON_SL} else "closed_other")
-            legs = payload["legs"]
-            if all(l["state"] in TERMINAL_LEG_STATES or l["state"] == "prepared" for l in legs):
-                payload["state"] = "closed"
-            elif any(l["state"] == "unknown" for l in legs):
-                payload["state"] = "needs_reconciliation"
-            self.journal.save(plan_id, payload)
+            self._check_owner(mt5.account_info(), payload)
+            self._refresh(mt5, plan_id, payload, now)
             return payload
 
-    def cancel_remaining(self, plan_id: str, why: str) -> Optional[dict]:
-        """Remove only THIS basket's still-pending orders (own magic/comment/ticket); never touches anything else."""
+    def _refresh(self, mt5, plan_id: str, payload: dict, now: datetime) -> None:
+        # broker time base, with a wide margin: a mis-set or changed offset must never hide this plan's deals
+        # (rows are matched by ticket/comment/magic, so the wider window cannot adopt foreign records)
+        tb = self.timebase_fn()
+        start = tb.to_broker(datetime.fromisoformat(payload["created_at"])) - timedelta(days=1)
+        end = tb.to_broker(now) + timedelta(days=1)
+        pending = mt5.orders_get(symbol=payload["symbol"])
+        positions = mt5.positions_get(symbol=payload["symbol"])
+        history = mt5.history_orders_get(start, end)
+        deals = mt5.history_deals_get(start, end)
+        if pending is None or positions is None or history is None or deals is None:
+            return  # cannot read now: keep the last known states
+        states = {mt5.ORDER_STATE_PLACED: "pending", mt5.ORDER_STATE_STARTED: "pending",
+                  mt5.ORDER_STATE_CANCELED: "cancelled", mt5.ORDER_STATE_EXPIRED: "expired",
+                  mt5.ORDER_STATE_REJECTED: "rejected", mt5.ORDER_STATE_PARTIAL: "partially_filled"}
+        out_entries = {mt5.DEAL_ENTRY_OUT, getattr(mt5, "DEAL_ENTRY_OUT_BY", 3)}
+        open_ids = {getattr(p, "identifier", getattr(p, "ticket", None)) for p in positions}
+        for leg in payload["legs"]:
+            # cancelled/expired legs are re-examined while the basket is open: a fill can race the removal and its
+            # deals can appear in history later; only truly final states are skipped
+            if leg["state"] in self.FINAL_LEG_STATES:
+                continue
+            live = [x for x in pending if self._owned(x, payload, leg)]
+            past = [x for x in history if self._owned(x, payload, leg)]
+            if len(live) + len(past) > 1 and not leg.get("ticket"):
+                leg["note"] = "several matching orders; needs manual review"
+                continue
+            order = (live or past or [None])[0]
+            if order is None:
+                continue  # unknown stays unknown (also a removal whose history is not visible yet); no resend
+            leg["ticket"] = order.ticket
+            ins = [d for d in deals if getattr(d, "order", None) == order.ticket and d.entry == mt5.DEAL_ENTRY_IN]
+            pos_ids = {d.position_id for d in ins if getattr(d, "position_id", None)}
+            if not pos_ids and order.state in (mt5.ORDER_STATE_FILLED, mt5.ORDER_STATE_PARTIAL):
+                pos_ids = {getattr(order, "position_id", 0) or order.ticket}
+            filled = round(sum(getattr(d, "volume", 0.0) for d in ins), 8)
+            if not ins and order.state == mt5.ORDER_STATE_FILLED:
+                filled = getattr(order, "volume_initial", None)
+            remaining = getattr(live[0], "volume_current", None) if live else 0.0
+            leg["filled_volume"], leg["pending_volume"] = filled, remaining
+            if not pos_ids:
+                leg["state"] = "pending" if live else states.get(order.state, "unknown")
+                continue
+            leg["position_id"] = sorted(pos_ids)[0] if len(pos_ids) == 1 else sorted(pos_ids)
+            if live:  # filled volume open AND a pending remainder still resting at the broker
+                leg["state"] = "partially_filled"
+                continue
+            if order.state != mt5.ORDER_STATE_FILLED:
+                leg["remainder"] = states.get(order.state, "unknown")  # e.g. partial fill, remainder cancelled/expired
+            pos_deals = [d for d in deals if getattr(d, "position_id", None) in pos_ids]
+            closes = [d for d in pos_deals if d.entry in out_entries]
+            if pos_ids & open_ids or not closes:
+                leg["state"] = "filled_open"
+                continue
+            # actual broker result: every deal of the position(s), entry-side commission/fees included
+            leg["broker_pnl"] = round(sum(getattr(x, "profit", 0.0) + getattr(x, "commission", 0.0) + getattr(x, "swap", 0.0)
+                                          + getattr(x, "fee", 0.0) for x in pos_deals), 2)
+            leg["exit_price"] = closes[-1].price
+            reasons = {d.reason for d in closes}
+            leg["state"] = ("closed_tp" if reasons == {mt5.DEAL_REASON_TP} else
+                            "closed_sl" if reasons == {mt5.DEAL_REASON_SL} else "closed_other")
+        legs = payload["legs"]
+        prefix = f"FVG-{plan_id}-"
+        plan_positions = [p for p in positions if getattr(p, "magic", None) == MAGIC
+                          and str(getattr(p, "comment", "") or "").startswith(prefix)]
+        leg_positions = {pid for l in legs for pid in (l.get("position_id") if isinstance(l.get("position_id"), list)
+                                                       else [l.get("position_id")]) if pid}
+        exposed = bool(plan_positions) or bool(leg_positions & open_ids)
+        if all(l["state"] in TERMINAL_LEG_STATES or l["state"] == "prepared" for l in legs) and not exposed:
+            since = payload.get("terminal_since")
+            if since is None:
+                payload["terminal_since"] = now.isoformat()
+            elif (now - datetime.fromisoformat(since)).total_seconds() >= self.SETTLE_SECONDS:
+                payload["state"] = "closed"
+        else:
+            payload.pop("terminal_since", None)
+            if any(l["state"] == "unknown" for l in legs):
+                payload["state"] = "needs_reconciliation"
+        self.journal.save(plan_id, payload)
+
+    def cancel_remaining(self, plan_id: str, why: str, now: Optional[datetime] = None) -> Optional[dict]:
+        """Remove only THIS basket's still-pending orders (own magic/comment/ticket); never closes a position or touches
+        its broker SL/TP. Every attempt first reads the broker's CURRENT pending orders: a ticket is (re)removed only
+        while it is verifiably still pending and owned, so an earlier unknown/timeout removal is retried safely and a
+        removal that actually succeeded is never duplicated. payload["cancel_state"]:
+          "complete" - a successful re-read shows no owned pending order left for this plan;
+          "pending"  - owned pending orders remain (rejected/unknown removal): retry later;
+          "unknown"  - the broker's pending orders could not be read (None): never assumed empty.
+        A successful removal proves only that the REMAINDER is gone; legs are re-read from fresh evidence."""
         with self.lock:
             payload = self.journal.get(plan_id)
             mt5 = self.mt5
             if payload is None or mt5 is None:
                 return payload
-            account = mt5.account_info()
-            if account is None or account_fp(account.login) != payload["account_fp"]:
-                raise OtherAccountError("cannot cancel on another account")
-            pending = mt5.orders_get(symbol=payload["symbol"]) or ()
+            self._check_owner(mt5.account_info(), payload)
+            pending = mt5.orders_get(symbol=payload["symbol"])
+            if pending is None:
+                payload["cancel_state"] = "unknown"
+                self.journal.save(plan_id, payload)
+                return payload
             for leg in payload["legs"]:
-                if leg["state"] not in ("pending", "partially_filled") or not leg.get("ticket"):
-                    continue
-                if not any(x.ticket == leg["ticket"] and self._owned(x, payload, leg) for x in pending):
-                    continue  # already filled/expired/cancelled at the broker: reconciliation will report it
+                live = [x for x in pending if self._owned(x, payload, leg)]
+                if not live:
+                    continue  # nothing of this leg is pending now (filled/expired/removed): evidence decides below
+                ticket = live[0].ticket
+                leg["ticket"] = leg.get("ticket") or ticket
                 try:
-                    result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": leg["ticket"], "magic": MAGIC})
+                    result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket, "magic": MAGIC})
                 except Exception:
                     result = None
+                leg["cancel_attempts"] = int(leg.get("cancel_attempts", 0)) + 1
                 if result is None or result.retcode in (mt5.TRADE_RETCODE_TIMEOUT, mt5.TRADE_RETCODE_CONNECTION):
                     leg["cancel"] = "unknown"
                 elif result.retcode == mt5.TRADE_RETCODE_DONE:
-                    if leg["state"] == "partially_filled":  # the filled part stays open with its broker SL/TP
-                        leg["state"], leg["remainder"], leg["cancel"] = "filled_open", "cancelled", why
-                    else:
-                        leg["state"], leg["cancel"] = "cancelled", why
+                    leg["cancel"] = why  # remainder removed; the state comes from the evidence below
                 else:
                     leg["cancel"] = f"rejected ({result.retcode})"
+            self.journal.save(plan_id, payload)
+            self._refresh(mt5, plan_id, payload, now or self._now())
+            after = mt5.orders_get(symbol=payload["symbol"])
+            if after is None:
+                payload["cancel_state"] = "unknown"
+            else:
+                still = [x for x in after if any(self._owned(x, payload, leg) for leg in payload["legs"])]
+                payload["cancel_state"] = "pending" if still else "complete"
             self.journal.save(plan_id, payload)
             return payload
 

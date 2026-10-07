@@ -62,10 +62,14 @@ def track_live(sig: Signal, new_bars: Iterable[Bar], quote: Optional[Quote], now
     """Advance one active live/demo signal. Returns True if the signal changed state."""
     if sig.outcome_status != "active":
         return False
+    hours = expiry_hours(sig, cfg)
+    deadline = sig.created_at + timedelta(hours=hours)
     for bar in new_bars:
         # Only bars that start at/after the entry quote: earlier prices happened before the simulated entry.
         if bar.open_time < sig.quote_time or (sig.last_checked and bar.close_time <= sig.last_checked):
             continue
+        if bar.open_time >= deadline:
+            break  # bars after the outcome window never settle a TP/SL (aligned with replay)
         hit = bar_hit(sig, bar, sig.spread)
         sig.last_checked = bar.close_time
         if hit == "ambiguous":
@@ -77,18 +81,17 @@ def track_live(sig: Signal, new_bars: Iterable[Bar], quote: Optional[Quote], now
                 note += " (ESTIMATE: Ask approximated as Bid bar + entry spread; demo/no-tick feed)"
             settle(sig, hit, bar.close_time, sig.tp if hit == "tp" else sig.sl, note)
             return True
-    if quote is not None and quote_fresh and quote.time >= sig.quote_time:
+    if quote is not None and quote_fresh and sig.quote_time <= quote.time <= deadline:
         hit = quote_hit(sig, quote)
         if hit:
             settle(sig, hit, quote.time, sig.tp if hit == "tp" else sig.sl, f"{hit.upper()} touched by live quote")
             return True
-    hours = expiry_hours(sig, cfg)
-    if now >= sig.created_at + timedelta(hours=hours):
-        if quote is not None and quote_fresh:
+    if now >= deadline:
+        if quote is not None and quote_fresh and quote.time <= deadline + timedelta(seconds=60):
             price = quote.bid if sig.direction == BUY else quote.ask
-            settle(sig, "expired", now, price, f"expired after {hours:g}h; marked at live exit-side quote")
+            settle(sig, "expired", deadline, price, f"expired after {hours:g}h; marked at live exit-side quote")
         else:
-            settle(sig, "expired", now, None, f"expired after {hours:g}h; no fresh quote to mark R")
+            settle(sig, "expired", deadline, None, f"expired after {hours:g}h; no exit-side quote at the deadline to mark R")
         return True
     return False
 
@@ -102,9 +105,13 @@ def track_measured(sig: Signal, observations: list[Quote], now: datetime, cfg: S
     if sig.outcome_status != "active":
         return False
     changed = False
+    hours = expiry_hours(sig, cfg)
+    deadline = sig.created_at + timedelta(hours=hours)
     for q in observations:
         if q.time < sig.quote_time or (sig.last_checked and q.time <= sig.last_checked) or q.time > now:
             continue
+        if q.time > deadline:
+            break  # the outcome window closed: a later TP/SL never overrides the expiry (same as tick replay)
         sig.last_checked = q.time
         px = q.bid if sig.direction == BUY else q.ask
         sig.meta["last_exit_px"], sig.meta["last_exit_time"] = px, q.time.isoformat()
@@ -121,12 +128,13 @@ def track_measured(sig: Signal, observations: list[Quote], now: datetime, cfg: S
         sig.meta["measurement_gaps"] = int(sig.meta.get("measurement_gaps", 0)) + 1
         sig.meta["last_gap"] = gap
         changed = True
-    hours = expiry_hours(sig, cfg)
-    if now >= sig.created_at + timedelta(hours=hours):
+    if now >= deadline:
         px = sig.meta.get("last_exit_px")
+        gaps = f"; {sig.meta['measurement_gaps']} tick-history gap(s) recorded" if sig.meta.get("measurement_gaps") else ""
         if px is None:
-            settle(sig, "expired", now, None, f"expired after {hours:g}h; no exit-side tick observed")
+            settle(sig, "expired", deadline, None, f"expired after {hours:g}h; no exit-side tick observed{gaps}")
         else:
-            settle(sig, "expired", now, float(px), f"expired after {hours:g}h; marked at the last observed exit-side tick")
+            settle(sig, "expired", deadline, float(px),
+                   f"expired after {hours:g}h; marked at the last observed exit-side tick before the deadline{gaps}")
         return True
     return changed

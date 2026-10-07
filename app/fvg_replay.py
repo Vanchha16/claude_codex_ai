@@ -27,7 +27,7 @@ from typing import Optional
 
 from .fastsweep import BANGKOK, BUY, M15, bangkok_date
 from .fvg import (PROFILES, FvgConfig, FvgSetup, Gap, advance_setup, basket_levels, detect_gap, new_setup, qualify,
-                  stop_within_spread)
+                  placement_violation, stop_within_spread)
 from .models import M5, UTC, Bar, SymbolMeta, aggregate, iso, parse_iso
 
 COVERED_HOURS = 12.0
@@ -153,8 +153,12 @@ def replay(m5: list[Bar], meta: SymbolMeta, cfg: FvgConfig, costs: Costs, *, hol
                     except ValueError as exc:
                         s.status, s.reason = "rejected", f"levels_invalid: {exc}"
                         continue
-                    if stop_within_spread(sl, [(l.number, l.entry) for l in legs], costs.spread, cfg):
-                        s.status, s.reason = "rejected", "stop_within_spread"  # same rule 6 as live (assumed spread)
+                    entries = [(l.number, l.entry) for l in legs]
+                    if stop_within_spread(sl, entries, costs.spread, cfg, meta.tick_size):
+                        s.status, s.reason = "rejected", "stop_within_spread"  # same rule 6a as live (assumed spread)
+                        continue
+                    if placement_violation(s.direction, entries, bar.close, bar.close + costs.spread, meta.tick_size):
+                        s.status, s.reason = "rejected", "limit_on_wrong_side_of_market"  # rule 6b, as the live preflight
                         continue
                     b = Basket(id=f"FVG-{s.direction}-{iso(s.a_open)}", direction=s.direction, bottom=s.bottom, top=s.top,
                                sl=sl, placed_at=t, pending_expires=t + timedelta(minutes=cfg.pending_expiry_minutes),

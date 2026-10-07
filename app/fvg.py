@@ -15,9 +15,10 @@ Predeclared v1 rules (task 20261007-111856; engineering starting values, not cla
 4. Three limit entries at 1% / 50% / 80% depth (BUY measured down from the top, SELL up from the bottom), BUY rounded
    down / SELL up to the tick; a zone too narrow for three distinct prices is rejected.
 5. One common SL 2 ticks beyond the far edge (rounded outward); each TP = its own entry +/- 2 * |entry - SL| (outward).
-6. Spread room: every leg's |entry - SL| must be >= min_stop_spread_multiple (2.0) x the current spread, else the whole
-   basket is rejected ("stop_within_spread"). A limit fills on the far side of the spread, so a stop closer than the
-   spread is hit at the instant of the fill (a certain loss of that leg's share).
+6. Eligibility at the decision boundary (task 20261007-161242): the confirmation must be at most 30 s old and its setup
+   unexpired; every leg's |entry - SL| must be >= current spread + 1 tick (equality passes), and every limit must rest
+   at least 1 tick on the correct side of the market; otherwise the WHOLE basket is rejected before any alert,
+   reservation or broker call. Entries, the wick-based common SL, TPs and risk are unchanged.
 Capacity, risk sizing and execution live in app/fvg_orders.py, app/fvg_replay.py, app/fvg_live.py, app/fvg_execution.py.
 """
 from __future__ import annotations
@@ -55,7 +56,8 @@ class FvgConfig:
     cooldown_minutes: int = 30
     max_baskets_per_day: int = 4              # per Asia/Bangkok date; a cap, not a quota (12 legs max)
     pending_expiry_minutes: int = 120         # unfilled limit legs expire 2 h after placement
-    min_stop_spread_multiple: float = 2.0     # every leg's |entry - SL| >= this x current spread (rule 6)
+    stop_spread_margin_ticks: int = 1         # every leg's |entry - SL| >= current spread + this many ticks (rule 6)
+    max_confirmation_age_seconds: int = 30    # a live confirmation older than this at decision time is never acted on
 
     def validate(self) -> "FvgConfig":
         if self.reward_risk != 2.0:
@@ -67,15 +69,16 @@ class FvgConfig:
             raise ValueError("entry depths must be strictly increasing")
         for name in ("ema_fast", "ema_slow", "trend_min_candles", "atr_period", "min_gap_ticks", "setup_minutes",
                      "confirm_bars", "sl_buffer_ticks", "quote_max_age_seconds", "cooldown_minutes",
+                     "max_confirmation_age_seconds",
                      "max_baskets_per_day", "pending_expiry_minutes"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
         if not self.ema_fast < self.ema_slow <= self.trend_min_candles:
             raise ValueError("need ema_fast < ema_slow <= trend_min_candles")
-        if (isinstance(self.min_stop_spread_multiple, bool) or not isinstance(self.min_stop_spread_multiple, (int, float))
-                or not math.isfinite(self.min_stop_spread_multiple) or self.min_stop_spread_multiple < 1):
-            raise ValueError("min_stop_spread_multiple must be >= 1")
+        if isinstance(self.stop_spread_margin_ticks, bool) or not isinstance(self.stop_spread_margin_ticks, int) \
+                or self.stop_spread_margin_ticks < 0:
+            raise ValueError("stop_spread_margin_ticks must be a non-negative integer")
         for name in ("gap_atr", "displacement_atr", "max_spread_price"):
             value = getattr(self, name)
             if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
@@ -299,16 +302,26 @@ def basket_levels(gap: Gap, meta: SymbolMeta, cfg: FvgConfig) -> tuple[float, tu
     return sl, tuple(legs)
 
 
-def stop_within_spread(sl: float, entries, spread: float, cfg: FvgConfig) -> Optional[str]:
-    """Rule 6: a reason string if any leg's stop is too close for the current spread, else None."""
+def stop_within_spread(sl: float, entries, spread: float, cfg: FvgConfig, tick: float) -> Optional[str]:
+    """Rule 6a: a reason if any leg's entry-to-stop distance is below spread + margin ticks (equality passes)."""
     if not math.isfinite(spread) or spread < 0:
         return "invalid spread"
-    need = cfg.min_stop_spread_multiple * spread
+    need = spread + cfg.stop_spread_margin_ticks * tick
     for n, entry in entries:
         distance = abs(entry - sl)
-        if distance + 1e-9 < need:
-            return (f"leg {n} stop distance {distance:.2f} is below {cfg.min_stop_spread_multiple:g} x spread "
-                    f"{spread:.2f}; it would be stopped out at or near the fill")
+        if distance + tick * 1e-6 < need:
+            return (f"leg {n} stop distance {distance:.2f} is below spread {spread:.2f} + "
+                    f"{cfg.stop_spread_margin_ticks} tick(s); the stop would sit inside the spread at the fill")
+    return None
+
+
+def placement_violation(direction: str, entries, bid: float, ask: float, tick: float) -> Optional[str]:
+    """Rule 6b: a reason if any limit would not rest at least 1 tick on the correct side of the market (BUY below the
+    Ask, SELL above the Bid) - the same placement rule the live preflight enforces."""
+    for n, entry in entries:
+        distance = (ask - entry) if direction == BUY else (entry - bid)
+        if distance + tick * 1e-6 < tick:
+            return f"leg {n} limit {entry} is not on the resting side of the market (bid {bid}, ask {ask})"
     return None
 
 
@@ -322,4 +335,4 @@ def m15_ready(m5_close: datetime) -> bool:
 
 __all__ = ["STRATEGY", "FvgConfig", "PROFILES", "is_fvg_version", "Gap", "detect_gap", "contiguous_run", "atr_last",
            "qualify", "FvgSetup", "new_setup", "advance_setup", "EntryLevel", "entry_ladder", "LegLevels",
-           "basket_levels", "stop_within_spread", "M5"]
+           "basket_levels", "stop_within_spread", "placement_violation", "M5"]

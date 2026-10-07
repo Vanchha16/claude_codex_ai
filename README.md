@@ -367,14 +367,30 @@ Code: `app/fvg.py` (rules), `app/fvg_orders.py` (sizing), `app/fvg_execution.py`
   each leg its own 1:2 TP. One open basket per symbol, 30 min cooldown, max 4 baskets per Bangkok date, pending expiry 2 h,
   a far-edge close cancels this basket's remaining pending legs (owned orders only). That far-edge check keeps running
   while the scanner is paused or catching up after stale quotes, and a resume never skips it.
-- **Spread room (rule 6):** every leg's |entry - SL| must be at least 2 x the current spread, otherwise the setup is
-  rejected (`stop_within_spread`) before any basket, alert or capacity use; the executor repeats the check on the quote
-  at send time. A limit fills on the far side of the spread, so a closer stop would be hit at the instant of the fill.
-  On the cached history this removes 0 baskets at a 0.20 spread, 2 at 0.35 and 3 at 0.40.
+- **Decision-time eligibility (rule 6):** a confirmation older than 30 s, from the future, or of an already expired setup
+  is consumed as rejected (a delayed scan never acts on it). Every leg's |entry - SL| must be >= current spread + 1 tick
+  (`stop_within_spread`) and every limit must rest >= 1 tick on the correct side of the market
+  (`limit_on_wrong_side_of_market`), otherwise the WHOLE basket is rejected before any alert, reservation or capacity
+  use; the executor repeats both on the send-time quote. Replay applies the same rules with its assumed spread (0 of the
+  16 cached-history baskets are affected at 0.20, 0.33 or 0.40).
+- **Account identity:** consent (opt-in), execution policy and journals are bound to the trade SERVER plus login (hashed).
+  The same login on another server is another account; legacy login-only consent/journals never match and stay visible
+  for manual review. Capacity counts baskets of the connected account (plus alert-only plans).
 - **Risk:** fixed total planned SL risk per setup from `config/fvg_risk.json` (`risk_usd_per_setup`, currently 10 USD),
   split into three equal shares; each leg's lots are the share / MT5 loss-per-lot, rounded **down** to the lot step. If any leg
   cannot fit the minimum lot the whole basket is rejected (no redistribution). USD accounts x1, USC (cent) x100, others refused.
   Fees, gaps and slippage can make actual losses larger.
+- **Who may trade (precedence):** 1) your explicit **Turn OFF** beats everything and persists across restarts and account
+  switches until you turn it ON again; 2) an exact saved arming (source/symbol/strategy version/server+login) - the only
+  way for REAL or CONTEST accounts; 3) `config/fvg_execution.json` `default_on_for_demo_accounts: true` - any verified
+  DEMO account (also after switching demo account/server) is ON without a new click. Unknown account types fail closed.
+  The dashboard shows which applies ("armed by you", "ON by default (demo account)", "turned OFF by you", ...).
+- **Freshness at the send boundary:** the decision uses the current clock (not the scan start); the confirmation age
+  (<= 30 s), setup expiry and pending lifetime are re-checked before preflight, after preflight and immediately before
+  every send. If they lapse mid-batch the remaining legs are not sent and accepted legs stay reconciled.
+- **Cancellation recovery:** a far-edge invalidation is recorded durably; removal of this basket's pending remainders is
+  retried (every 30 s, after re-reading the broker's current pending orders) until the broker shows none left. An
+  unreadable order list counts as unknown, never as "none", and a removal that already succeeded is not repeated.
 - **Execution switch:** System -> *FVG automatic execution* (or `POST /api/fvg/execution` with `confirm: true`). Refused while FVG
   is inactive, on demo, without risk config, with an unsupported currency or a netting account. The opt-in is bound to the
   source, symbol, a hash of the account login and the strategy version; any change turns it OFF. Telegram alerts report the plan

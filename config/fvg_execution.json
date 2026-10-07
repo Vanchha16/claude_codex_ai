@@ -1,0 +1,4 @@
+{
+  "_comment": "FVG automatic execution defaults (user request 2026-10-07). default_on_for_demo_accounts=true: on a DEMO MT5 account FVG submits its 3 limit orders automatically without a per-account arming click, unless the user explicitly turned it OFF in the dashboard (that choice persists until turned ON again). REAL or contest accounts are never ON by default: they still need the explicit one-time arming bound to that account. Missing or invalid file = no default (OFF).",
+  "default_on_for_demo_accounts": true
+}

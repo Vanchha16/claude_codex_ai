@@ -8,11 +8,12 @@ import pytest
 
 from app.fvg import Gap
 from app.fvg_execution import (DOC_CONSTANTS, MAGIC, ExecutionJournal, ExecutionOptIn, ExecutionPolicy, MT5FvgExecutor,
-                               account_fp, leg_comment, load_risk_usd)
+                               account_id, leg_comment, load_risk_usd)
 from app.fvg_orders import account_cash_risk
 from .test_fvg import BUY, META, T, candles
 
 LOGIN = 77
+SERVER = "Test-Server"
 
 
 class Broker:
@@ -34,7 +35,7 @@ class Broker:
         self.fail_at = self.fail_code = None
         self.check_code = 0
         self.orders, self.history, self.positions, self.deals = (), (), (), ()
-        self.account = NS(login=LOGIN, equity=200.0, margin_free=10000.0, margin_mode=2, trade_allowed=True,
+        self.account = NS(login=LOGIN, server=SERVER, equity=200.0, margin_free=10000.0, margin_mode=2, trade_allowed=True,
                           trade_expert=True, currency=currency)
         self.symbol = NS(trade_mode=4, trade_tick_size=0.01, point=0.01, digits=2, volume_min=0.01, volume_max=100.0,
                          volume_step=0.01, trade_stops_level=0, order_mode=2 | 1, expiration_mode=4 | 1, filling_mode=1)
@@ -78,6 +79,10 @@ class Broker:
     def order_send(self, request):
         if request["action"] == self.TRADE_ACTION_REMOVE:
             self.removed.append(request["order"])
+            # like a broker: the removed order leaves the live list and appears in history as CANCELED
+            gone = [o for o in self.orders if o.ticket == request["order"]]
+            self.orders = tuple(o for o in self.orders if o.ticket != request["order"])
+            self.history = tuple(self.history) + tuple(NS(**{**vars(o), "state": self.ORDER_STATE_CANCELED}) for o in gone)
             return NS(retcode=self.TRADE_RETCODE_DONE, order=request["order"])
         self.requests.append(request)
         if len(self.requests) == self.fail_at:
@@ -86,7 +91,8 @@ class Broker:
 
 
 def policy(**kw):
-    base = dict(enabled=True, risk_usd=10.0, account_login=LOGIN, source="mt5", symbol=META.name, strategy_version="FVG-test")
+    base = dict(enabled=True, risk_usd=10.0, account_login=LOGIN, source="mt5", symbol=META.name, strategy_version="FVG-test",
+                account_server=SERVER)
     base.update(kw)
     return ExecutionPolicy(**base)
 
@@ -141,10 +147,12 @@ def test_arming_needs_a_complete_binding():
 
 def test_opt_in_binding_and_risk_preference_do_not_arm_each_other(tmp_path):
     optin = ExecutionOptIn(tmp_path / "optin.json")
-    binding = {"source": "mt5", "symbol": META.name, "account": account_fp(LOGIN), "strategy_version": "v1"}
+    binding = {"source": "mt5", "symbol": META.name, "account": account_id(NS(server=SERVER, login=LOGIN)),
+               "strategy_version": "v1"}
     assert not optin.matches(binding)  # default OFF, even with a configured risk preference
     optin.arm(binding, T)
-    assert optin.matches(binding) and not optin.matches({**binding, "account": account_fp(88)})
+    assert optin.matches(binding) and not optin.matches({**binding, "account": account_id(NS(server=SERVER, login=88))})
+    assert not optin.matches({**binding, "account": account_id(NS(server="Other-Server", login=LOGIN))})
     assert not optin.matches({**binding, "symbol": "OTHER"}) and not optin.matches({**binding, "strategy_version": "v2"})
     assert str(LOGIN) not in (tmp_path / "optin.json").read_text()  # login number never stored
     optin.disarm()
@@ -166,7 +174,8 @@ def test_three_limits_fixed_ten_usd_equal_shares_and_idempotent_restart(env):
     assert result["cash_risk_account_ccy"] == 10.0 and result["nominal_planned_loss"] <= 10.0 + 1e-9
     assert all(l["planned_loss"] <= 10 / 3 + 1e-9 for l in legs)
     assert legs[0]["volume"] < legs[1]["volume"] < legs[2]["volume"]  # wider stop distance -> fewer lots
-    assert account_fp(LOGIN) == result["account_fp"] and "account_login" not in result
+    assert result["account_id"] == account_id(broker.account) and "account_login" not in result
+    assert str(LOGIN) not in json.dumps(result)
     restarted = MT5FvgExecutor(lambda: broker, journal, executor.policy)
     assert submit(restarted, gap) == result and len(broker.requests) == 3
 

@@ -1,4 +1,5 @@
-"""Background scanner: one per process. Never blocks web requests; never trades.
+"""Background scanner: one per process. Never blocks web requests. CRT/FastSweep never trade; the opt-in FVG engine
+submits only through app/fvg_execution.py when its automatic execution is explicitly ON.
 
 Each scan: check feed health and quote freshness -> track simulated outcomes -> feed newly CLOSED M5 bars
 (and H1 closes) to the engine in time order -> live tick invalidation and deadline checks -> queue delivery.
@@ -38,13 +39,15 @@ M5_WINDOW = {"crt": 300, "fastsweep": 600, "fvg": 600}  # FastSweep: >= 50 conti
 
 class Scanner:
     def __init__(self, settings: Settings, cfg: StrategyConfig, feed, store: SqliteStore, delivery: Delivery,
-                 active: Optional[ActiveStrategy] = None, *, fvg_store=None, fvg_executor_fn=None, fvg_maintenance_fn=None):
+                 active: Optional[ActiveStrategy] = None, *, fvg_store=None, fvg_executor_fn=None, fvg_maintenance_fn=None,
+                 fvg_account_fn=None):
         self.settings, self.cfg, self.feed, self.store, self.delivery = settings, cfg, feed, store, delivery
         self.active = active or ActiveStrategy("crt")  # CRT-SMC-v1 unless another strategy is explicitly selected
         # FVG only: its own record store and the (default OFF) execution hooks supplied by the workstation
         self.fvg_store = fvg_store
         self.fvg_executor_fn = fvg_executor_fn or (lambda: (None, "automatic execution OFF"))
         self.fvg_maintenance_fn = fvg_maintenance_fn or (lambda: None)
+        self.fvg_account_fn = fvg_account_fn or (lambda: None)
         self.engine = None  # Engine (CRT) or FastSweepEngine
         self.paused = store.get_meta("paused", "0") == "1"
         self._stop = threading.Event()
@@ -235,9 +238,10 @@ class Scanner:
                 if sig.outcome_status != "active":
                     self.store.add_event("outcome", f"{sig.id}: {sig.outcome_status.upper()} ({sig.outcome_note})", at=now)
 
-        if self.active.is_fvg:  # broker reconciliation and far-edge cancels of accepted baskets continue while paused/stale
-            self.engine.reconcile(now)
-            self.engine.manage_baskets(m5, now)
+        if self.active.is_fvg:
+            self.engine.reconcile(now)  # broker reconciliation continues while paused or stale
+            if fresh:  # far-edge maintenance of accepted baskets also while PAUSED, but only on trusted (fresh) context;
+                self.engine.manage_baskets(m5, now)  # after stale periods it catches up over all bars since placement
 
         if self.paused:
             return
@@ -328,7 +332,8 @@ class Scanner:
                 raise RuntimeError("FVG selected but no FVG record store was provided")
             engine = FvgLiveEngine(self.active.fvg, meta, self.fvg_store, self.store, self.feed.mode,
                                    alert_fn=lambda b: self.delivery.on_fvg_basket(b),
-                                   executor_fn=self.fvg_executor_fn, maintenance_fn=self.fvg_maintenance_fn)
+                                   executor_fn=self.fvg_executor_fn, maintenance_fn=self.fvg_maintenance_fn,
+                                   account_fn=self.fvg_account_fn)
             version = engine.version
         elif self.active.is_fastsweep:
             engine = FastSweepEngine(self.active.fastsweep, self.active.profile, meta, self.store, self.feed.mode)

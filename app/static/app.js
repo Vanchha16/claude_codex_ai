@@ -198,7 +198,9 @@ function renderFvg(f, act) {
   const on = f.auto_execution === "ON";
   dotChip($("fvg-auto"), on ? "Auto execution ON" : "Auto execution OFF", on ? "warning" : "light");
   $("fvg-strategy").textContent = f.strategy_active ? `active (${act.label || "FVG"})` : "inactive build (not the active strategy)";
-  $("fvg-reason").textContent = on ? `armed ${fmtT(f.armed_at)}` : (f.reason || "OFF");
+  $("fvg-reason").textContent = on
+    ? (f.armed_by === "you" ? `armed by you ${fmtT(f.armed_at)}` : `ON by ${f.armed_by || "default"}`)
+    : (f.reason || "OFF");
   $("fvg-budget").textContent = f.risk_configured ? `${money(f.risk_usd)} total planned SL risk per setup` : "not configured";
   $("fvg-share").textContent = f.risk_configured ? `${money(f.risk_usd / 3)} per leg before lot rounding` : "—";
   $("fvg-pct").textContent = f.risk_pct_of_equity !== null && f.risk_pct_of_equity !== undefined
@@ -756,7 +758,7 @@ $("btn-demo-restart").onclick = async () => {
 $("btn-mode").onclick = async () => {
   const target = STATE.mode === "demo" ? "mt5" : "demo";
   const msg = target === "mt5"
-    ? "Switch to LIVE MT5? VC Signal will read live data (read-only) from your running, logged-in MetaTrader 5 terminal. No trades are placed. The choice is saved and survives restarts."
+    ? "Switch to LIVE MT5? VC Signal will read live data from your running, logged-in MetaTrader 5 terminal. CRT/FastSweep never trade; FVG places pending orders only if its automatic execution is ON for this server+login. The choice is saved and survives restarts."
     : "Switch to DEMO (fictional data)? The choice is saved and survives restarts.";
   if (!window.confirm(msg)) return;
   try { await api("/api/mode", { method: "POST", body: { mode: target, confirm: true } }); selected = null; selectedRec = null; setupDirty = false; await refreshState(); refreshTables(); if (CHART) CHART.load(); }

@@ -25,11 +25,12 @@ from typing import Callable, Optional
 
 from .fastsweep import BUY, M15, bangkok_date, ema_last
 from .fvg import (FvgConfig, FvgSetup, Gap, advance_setup, atr_last, basket_levels, contiguous_run, detect_gap, new_setup,
-                  qualify, stop_within_spread)
-from .fvg_execution import OtherAccountError, plan_id_for
-from .models import Bar, SymbolMeta, aggregate, iso, parse_iso
+                  placement_violation, qualify, stop_within_spread)
+from .fvg_execution import OtherAccountError, UnverifiableAccountError, plan_id_for
+from .models import M5, Bar, SymbolMeta, aggregate, iso, parse_iso
 
 OPEN_EXEC_STATES = {"submitting", "submitted", "partial", "needs_reconciliation"}
+CANCEL_RETRY_SECONDS = 30  # bounded cadence for re-verifying/re-removing an unresolved owned pending remainder
 
 
 def _dump_setup(s: FvgSetup) -> dict:
@@ -133,10 +134,14 @@ class FvgLiveEngine:
     def __init__(self, cfg: FvgConfig, meta: SymbolMeta, fstore: FvgStore, events, mode: str, *,
                  alert_fn: Callable[[dict], None] = lambda b: None,
                  executor_fn: Callable[[], tuple[object, str]] = lambda: (None, "automatic execution OFF"),
-                 maintenance_fn: Callable[[], object] = lambda: None):
+                 maintenance_fn: Callable[[], object] = lambda: None,
+                 account_fn: Callable[[], Optional[str]] = lambda: None,
+                 clock: Optional[Callable[[], datetime]] = None):
         self.cfg, self.meta, self.fstore, self.events, self.mode = cfg.validate(), meta, fstore, events, mode
         self.symbol, self.version = meta.name, cfg.version
         self.alert_fn, self.executor_fn, self.maintenance_fn = alert_fn, executor_fn, maintenance_fn
+        self.account_fn = account_fn  # canonical server+login identity of the connected account (None = unavailable)
+        self.clock = clock  # current UTC clock for decisions when no live entry callback supplies one
         self.eligible_after: Optional[datetime] = None
         self.last_evaluation: Optional[dict] = None
         self.readiness: Optional[dict] = None
@@ -202,7 +207,27 @@ class FvgLiveEngine:
         cfg = self.cfg
         if self.eligible_after is not None and not s.confirm_close > self.eligible_after:
             return self._reject(s, "confirmation_before_session_watermark", now)  # history: never alerted or sent
-        family = self._family()
+        # the CURRENT decision time (not the scan start): the live entry callback returns (quote, current clock time);
+        # without one, an injected clock; the quote's own timestamp never stands in for the wall clock
+        entry_fn = getattr(self, "_entry_fn", None)
+        quote = None
+        if entry_fn is not None:
+            quote, current = entry_fn(None, None)
+            now = max(now, current) if current is not None else now
+        elif self.clock is not None:
+            now = max(now, self.clock())
+        # decision-time freshness: a delayed scan must never act on an old confirmation (consumed, not replayed)
+        age = (now - s.confirm_close).total_seconds()
+        if now >= s.expires:
+            return self._reject(s, "setup_expired_at_decision", now)
+        if age < 0:
+            return self._reject(s, "confirmation_in_future", now)
+        if age > cfg.max_confirmation_age_seconds:
+            return self._reject(s, f"confirmation_too_old ({age:.0f}s > {cfg.max_confirmation_age_seconds}s)", now)
+        current = self.account_fn()
+        # capacity within the connected account's context (alert-only plans have no account); other-account plans stay
+        # tracked but do not block this account
+        family = [b for b in self._family() if current is None or b.get("account_id") in (None, current)]
         if any(basket_is_open(b, now) for b in family):
             return self._reject(s, "basket_already_open", now)
         last = max((parse_iso(b["placed_at"]) for b in family), default=None)
@@ -215,14 +240,16 @@ class FvgLiveEngine:
             sl, legs = basket_levels(gap, self.meta, cfg)
         except ValueError as exc:
             return self._reject(s, f"levels_invalid: {exc}", now)
-        entry_fn = getattr(self, "_entry_fn", None)
         if entry_fn is not None:  # rule 6 on the live quote, BEFORE a basket exists (no alert, no capacity used)
-            quote = entry_fn(None, None)[0]
             if quote is None:
-                return self._reject(s, "no_quote_for_spread_check", now)
-            why = stop_within_spread(sl, [(l.number, l.entry) for l in legs], quote.ask - quote.bid, cfg)
+                return self._reject(s, "no_quote_for_eligibility_check", now)
+            entries = [(l.number, l.entry) for l in legs]
+            why = stop_within_spread(sl, entries, quote.ask - quote.bid, cfg, self.meta.tick_size)
             if why:
                 return self._reject(s, f"stop_within_spread: {why}", now)
+            why = placement_violation(s.direction, entries, quote.bid, quote.ask, self.meta.tick_size)
+            if why:
+                return self._reject(s, f"limit_on_wrong_side_of_market: {why}", now)
         pid = plan_id_for(s.key)
         expires = now + timedelta(minutes=cfg.pending_expiry_minutes)
         basket = {"id": f"FVG-{pid}", "plan_id": pid, "setup_key": s.key, "symbol": self.symbol, "version": self.version,
@@ -231,7 +258,8 @@ class FvgLiveEngine:
                   "placed_at": iso(now), "pending_expires": iso(expires), "accepted": True, "status": "planned",
                   "legs": [{"n": l.number, "pct": l.percent, "entry": l.entry, "tp": l.tp, "sl": sl,
                             "rr": round(abs(l.tp - l.entry) / abs(l.entry - sl), 2)} for l in legs],
-                  "execution": None, "meta": {"digits": self.meta.digits, "tick_size": self.meta.tick_size}}
+                  "execution": None, "meta": {"digits": self.meta.digits, "tick_size": self.meta.tick_size},
+                  "account_id": current}
         if not self.fstore.add_basket(basket):
             return self._reject(s, "duplicate_basket", now)
         s.meta["basket"] = basket["id"]
@@ -241,36 +269,53 @@ class FvgLiveEngine:
             self.alert_fn(basket)  # existing Telegram opt-in + outbox (dedup by basket id); never the submission trigger
         except Exception as exc:  # an alert problem must not stop the basket lifecycle
             self._event("error", f"{basket['id']}: alert failed: {type(exc).__name__}", now, "error")
-        executor, why = self.executor_fn()
+        try:
+            executor, why = self.executor_fn()
+        except Exception as exc:  # no executor = nothing could have been sent
+            executor, why = None, f"execution unavailable: {type(exc).__name__}"
         if executor is None:
             basket["status"], basket["execution"] = "alert_only", {"state": "not_submitted", "reason": why}
         else:
             try:
                 result = executor.submit(pid, gap, self.meta, now, expires,  # automatic: no per-trade confirmation
-                                         min_stop_spread_multiple=cfg.min_stop_spread_multiple)
+                                         stop_spread_margin_ticks=cfg.stop_spread_margin_ticks,
+                                         eligibility={"confirm_close": s.confirm_close, "setup_expires": s.expires,
+                                                      "max_age_seconds": cfg.max_confirmation_age_seconds})
             except Exception as exc:
-                # if the journal row exists, orders may already be at the broker: never label that "rejected"
-                journal = getattr(executor, "journal", None)
-                payload = journal.get(pid) if journal is not None else None
-                if payload is not None:
-                    payload["state"], payload["error"] = "needs_reconciliation", f"{type(exc).__name__}: {exc}"
-                    try:
-                        journal.save(pid, payload)
-                    except Exception:
-                        pass
-                    result = payload
-                else:
-                    result = {"state": "preflight_rejected", "reason": str(exc)}
+                result = self._classify_submit_error(executor, pid, exc)
             basket["execution"] = result
             basket["status"] = EXEC_STATUS.get(result.get("state"), result.get("state", "unknown"))
             self._event("order", f"{basket['id']}: automatic execution {result.get('state')}"
                                  + (f" ({result.get('reason')})" if result.get("reason") else ""), now)
         self.fstore.update_basket(basket)
 
+    @staticmethod
+    def _classify_submit_error(executor, pid: str, exc: Exception) -> dict:
+        """A genuine preflight failure has NO journal row (the row is written before any send). If the row exists,
+        sending may have begun -> reconciliation; if the journal cannot even be read, the outcome is uncertain."""
+        error = f"{type(exc).__name__}: {exc}"
+        journal = getattr(executor, "journal", None)
+        try:
+            payload = journal.get(pid) if journal is not None else None
+        except Exception as read_exc:
+            return {"state": "needs_reconciliation", "uncertain": True,
+                    "reason": f"execution error ({error}) and the journal is unreadable ({type(read_exc).__name__}); "
+                              "a send may have begun - recovered from the journal when storage is available"}
+        if payload is None:
+            return {"state": "preflight_rejected", "reason": str(exc)}
+        payload["state"], payload["error"] = "needs_reconciliation", error
+        try:
+            journal.save(pid, payload)
+        except Exception:
+            pass  # the basket row below still carries the adopted payload
+        return payload
+
     def manage_baskets(self, m5: list[Bar], now: datetime) -> None:
         """Every scan, also while PAUSED or catching up after stale quotes: apply the far-edge rule to already accepted
         baskets over all closed bars after placement. Idempotent (each basket is invalidated once); never creates
         setups, alerts or submissions."""
+        for b in self._family():  # durably invalidated baskets keep being resolved without a new breach
+            self._retry_cancel(b, now)
         family = [b for b in self._family() if not b.get("zone_invalidated_at") and not b.get("other_account")
                   and (basket_is_open(b, now) or b["status"] in ("alert_only", "planned"))]
         if not family:
@@ -288,33 +333,68 @@ class FvgLiveEngine:
                     self.fstore.update_basket(b)
                 continue
             if b.get("zone_invalidated_at") or bar.close_time <= parse_iso(b["placed_at"]):
-                continue  # already handled, or a close from before the plan existed
+                continue  # invalidation already detected (durable), or a close from before the plan existed
+            if bar.tf != M5 or not bar.is_valid():
+                continue  # only valid closed M5 bars can invalidate a zone
             far = bar.close < b["bottom"] if b["direction"] == BUY else bar.close > b["top"]
             if not far:
                 continue
-            if b["status"] == "alert_only":
-                b["status"] = "zone_invalidated"
-            else:
-                ex = self.maintenance_fn()
-                if ex is None:
-                    continue  # cannot reach the broker now: retried on the next scan
-                try:
-                    b["execution"] = ex.cancel_remaining(b["plan_id"], "zone invalidated") or b["execution"]
-                except OtherAccountError:
-                    self._mark_other_account(b, now)
-                    continue
-                except Exception as exc:
-                    self._event("error", f"{b['id']}: cancel failed: {exc}", bar.close_time, "error")
-                    continue  # not marked: retried on the next scan
+            # 1) the invalidation is recorded durably, independent of whether the broker removal succeeds; a later
+            #    return inside the zone never erases it
             b["zone_invalidated_at"] = iso(bar.close_time)
+            if b["status"] == "alert_only":
+                b["status"], b["cancel_complete"] = "zone_invalidated", True
+                self.fstore.update_basket(b)
+                continue
+            b["cancel_complete"] = False
             self.fstore.update_basket(b)
+            # 2) removal of the owned remainders, retried until broker evidence proves completion
+            self._retry_cancel(b, now, force=True)
 
-    def _mark_other_account(self, b: dict, now: datetime) -> None:
-        if not b.get("other_account"):
-            b["other_account"] = True
+    def _retry_cancel(self, b: dict, now: datetime, force: bool = False) -> None:
+        """Resolve the cancellation of an invalidated basket's pending remainders: bounded cadence, each attempt verifies
+        the current broker state first (never a blind duplicate), on the ORIGINAL account only."""
+        if not b.get("zone_invalidated_at") or b.get("cancel_complete") or b.get("other_account"):
+            return
+        if not force and b.get("cancel_retry_at") and now < parse_iso(b["cancel_retry_at"]):
+            return
+        ex = self.maintenance_fn()
+        if ex is None:
+            return  # no broker access now: retried on a later scan
+        b["cancel_retry_at"] = iso(now + timedelta(seconds=CANCEL_RETRY_SECONDS))
+        try:
+            payload = ex.cancel_remaining(b["plan_id"], "zone invalidated", now)
+        except OtherAccountError as exc:
+            self._mark_other_account(b, now, exc)  # resumes when the original account is connected again
+            return
+        except Exception as exc:
             self.fstore.update_basket(b)
-            self._event("warning", f"{b['id']}: submitted on another MT5 account; not managed or counted here until "
-                                   "that account is connected again (its orders keep their broker SL/TP/expiry)", now, "warning")
+            self._error_once(b, f"cancel failed (will retry): {exc}", now)
+            return
+        if payload:
+            b["execution"] = payload
+            state = payload.get("cancel_state")
+            b["cancel_complete"] = state == "complete"
+            if state != "complete":
+                self._error_once(b, f"pending remainder cancellation not confirmed ({state}); retrying", now)
+            else:
+                b.pop("last_error", None)
+        self.fstore.update_basket(b)
+
+    def _mark_other_account(self, b: dict, now: datetime, exc: Optional[Exception] = None) -> None:
+        legacy = isinstance(exc, UnverifiableAccountError)
+        reason = ("legacy journal without server identity: ownership unverifiable; needs manual review" if legacy else
+                  "submitted on another MT5 server/login; not managed or counted here until that account is connected again")
+        if b.get("other_account") != reason:
+            b["other_account"] = reason
+            self.fstore.update_basket(b)
+            self._event("warning", f"{b['id']}: {reason} (its orders keep their broker SL/TP/expiry)", now, "warning")
+
+    def _error_once(self, b: dict, msg: str, now: datetime) -> None:
+        if b.get("last_error") != msg:  # the same failure is logged once, not every 5-second scan
+            b["last_error"] = msg
+            self.fstore.update_basket(b)
+            self._event("error", f"{b['id']}: {msg}", now, "error")
 
     # ------------------------------------------------------------------ every scan
     def reconcile(self, now: datetime) -> None:
@@ -328,12 +408,20 @@ class FvgLiveEngine:
                 continue
             try:
                 payload = ex.reconcile(b["plan_id"], now)
-            except OtherAccountError:
-                self._mark_other_account(b, now)  # logged once, not every scan
+            except OtherAccountError as exc:
+                self._mark_other_account(b, now, exc)  # logged once, not every scan
                 continue
             except Exception as exc:
-                self._event("error", f"{b['id']}: reconcile failed: {exc}", now, "error")
+                self._error_once(b, f"reconcile failed: {exc}", now)
                 continue
+            if payload is None and (b.get("execution") or {}).get("uncertain"):
+                # the journal is readable again and has NO row: it is written before any send, so nothing was sent
+                b["status"] = "interrupted_unsubmitted"
+                b["execution"] = {"state": "not_submitted", "reason": "no execution journal row exists: nothing was sent"}
+                self.fstore.update_basket(b)
+                self._event("order", f"{b['id']}: uncertain submission resolved - nothing was sent", now)
+                continue
+            b.pop("last_error", None)
             if payload and b.get("other_account"):
                 b.pop("other_account")  # its account is connected again
                 self._event("order", f"{b['id']}: original MT5 account connected again; managed and counted again", now)
@@ -342,6 +430,7 @@ class FvgLiveEngine:
                 if payload.get("state") == "closed":
                     b["status"] = "closed"
                 self.fstore.update_basket(b)
+            self._retry_cancel(b, now)  # through pause/stale/reconnect: broker access is enough, no new bar needed
 
     def _recover_planned(self, b: dict, ex, now: datetime) -> None:
         """A basket accepted before a process exit: adopt the execution journal (committed before any send), so its owned

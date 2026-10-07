@@ -166,7 +166,7 @@ def server_broker(offset):
 
 def make_exec(tmp_path, broker, tb):
     journal = ExecutionJournal(tmp_path / "j.sqlite")
-    return MT5FvgExecutor(lambda: broker, journal, policy(), timebase_fn=lambda: tb), journal
+    return MT5FvgExecutor(lambda: broker, journal, policy(account_server=SERVER), timebase_fn=lambda: tb), journal
 
 
 def test_codex_reproduction_feed_offset_now_reaches_the_executor(tmp_path):

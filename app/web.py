@@ -29,7 +29,7 @@ from .data.demo import DemoFeed
 from .data.mt5 import MT5Feed
 from .active_strategy import ActiveStrategy, fastsweep_version, is_fastsweep_version, load_active_strategy
 from .delivery import Delivery, format_fvg_basket, format_signal
-from .fvg_execution import (ExecutionJournal, ExecutionOptIn, ExecutionPolicy, MT5FvgExecutor, account_fp, load_risk_usd)
+from .fvg_execution import (ExecutionJournal, ExecutionOptIn, ExecutionPolicy, MT5FvgExecutor, account_id, load_risk_usd)
 from .fvg_live import FvgStore, basket_is_open
 from .fvg_orders import ACCOUNT_UNITS_PER_USD
 from .market import CHART_TIMEFRAMES, ChartUnavailable, validate_request
@@ -40,6 +40,7 @@ from .store import SqliteStore
 
 STATIC = Path(__file__).resolve().parent / "static"
 REPLAY_MAX_DAYS = 60
+FVG_EXECUTION_FILE = PROJECT_ROOT / "config" / "fvg_execution.json"
 FVG_RISK_FILE = PROJECT_ROOT / "config" / "fvg_risk.json"  # confirmed risk PREFERENCE only; never arms execution
 
 
@@ -76,6 +77,8 @@ class Workstation:
         self.fvg_journal: Optional[ExecutionJournal] = None
         self.fvg_risk_path = FVG_RISK_FILE
         self.fvg_optin = ExecutionOptIn(state_dir / "fvg_execution_optin.json")
+        self.fvg_execution_path = FVG_EXECUTION_FILE
+        self.fvg_user_off = state_dir / "fvg_execution_user_off.json"  # the user's explicit OFF beats the demo default
 
     def _db_path(self, mode: str) -> Path:
         if mode == "demo":
@@ -115,7 +118,7 @@ class Workstation:
                 self.fvg_store = FvgStore(self.state_dir / f"fvg-{safe}.sqlite")
                 self.fvg_journal = ExecutionJournal(self.state_dir / f"fvg-execution-{safe}.sqlite")
                 fvg_kw = {"fvg_store": self.fvg_store, "fvg_executor_fn": self._fvg_executor,
-                          "fvg_maintenance_fn": self._fvg_maintenance}
+                          "fvg_maintenance_fn": self._fvg_maintenance, "fvg_account_fn": self._fvg_account}
             self.scanner = Scanner(self.settings, self.cfg, feed, self.store, self.delivery, active=self.active, **fvg_kw)
             if mode == "mt5":
                 feed.connect()
@@ -165,8 +168,39 @@ class Workstation:
         return getattr(feed, "timebase", None) or UTC_BASE
 
     def _fvg_binding(self, account) -> dict:
-        return {"source": self.mode, "symbol": self.settings.symbol, "account": account_fp(account.login),
+        # canonical server+login identity: legacy login-only opt-ins never match (fail closed, need new arming)
+        return {"source": self.mode, "symbol": self.settings.symbol, "account": account_id(account),
                 "strategy_version": self.active.fvg.version if self.active.is_fvg else None}
+
+    def _fvg_default_on_demo(self) -> bool:
+        try:
+            raw = json.loads(self.fvg_execution_path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return False  # missing/invalid = no default
+        return isinstance(raw, dict) and raw.get("default_on_for_demo_accounts") is True
+
+    def _fvg_armed(self, account, mt5) -> tuple[bool, Optional[str], Optional[str]]:
+        """(ON?, reason when OFF, how it is ON). Order of precedence (task 20261007-164056):
+        1. the user's explicit OFF beats everything (also a stale/inconsistent saved opt-in) and persists;
+        2. an exact saved binding (source/symbol/strategy version/server+login) - the only way for REAL/CONTEST;
+        3. the configured category default for VERIFIED demo accounts (user's choice, any demo server+login);
+        anything else - real, contest, unknown/unavailable account type - is OFF (fails closed)."""
+        if self.fvg_user_off.exists():
+            return False, "turned OFF by you", None
+        if self.fvg_optin.matches(self._fvg_binding(account)):
+            return True, None, "you"
+        kind = {getattr(mt5, "ACCOUNT_TRADE_MODE_DEMO", 0): "demo", getattr(mt5, "ACCOUNT_TRADE_MODE_CONTEST", 1): "contest",
+                getattr(mt5, "ACCOUNT_TRADE_MODE_REAL", 2): "real"}.get(getattr(account, "trade_mode", None), "unknown")
+        if kind == "demo" and self._fvg_default_on_demo():
+            return True, None, "default (demo account)"
+        if kind == "real":
+            return False, "real-money account: needs your explicit arming for this server+login", None
+        if kind == "contest":
+            return False, "contest account: needs your explicit arming for this server+login", None
+        if kind == "unknown":
+            return False, "account type unknown: not treated as demo; needs explicit arming", None
+        return False, ("not armed" if self.fvg_optin.load() is None else
+                       "opt-in does not match the current source/symbol/strategy/server+login"), None
 
     def _fvg_executor(self):
         """Called by the FVG engine (inside the scan, under the feed lock) for each newly accepted basket."""
@@ -182,11 +216,22 @@ class Workstation:
         if account is None:
             return None, "MT5 account unavailable"
         binding = self._fvg_binding(account)
-        if not self.fvg_optin.matches(binding):
-            return None, "automatic execution OFF"
-        policy = ExecutionPolicy(True, risk, account.login, "mt5", self.settings.symbol, binding["strategy_version"])
+        armed, why, _ = self._fvg_armed(account, mt5)
+        if not armed:
+            return None, f"automatic execution OFF ({why})"
+        policy = ExecutionPolicy(True, risk, account.login, "mt5", self.settings.symbol, binding["strategy_version"],
+                                 account_server=getattr(account, "server", None))
         return MT5FvgExecutor(self._mt5_module, self.fvg_journal, policy, lock=lock, timebase_fn=self._mt5_timebase,
                               clock=lambda: datetime.now(UTC)), "ON"
+
+    def _fvg_account(self) -> Optional[str]:
+        """Canonical server+login identity of the connected account (never the login itself); None if unavailable."""
+        if self.mode != "mt5":
+            return None
+        with self._mt5_lock():
+            mt5 = self._mt5_module()
+            account = mt5.account_info() if mt5 is not None else None
+        return account_id(account) if account is not None else None
 
     def _fvg_maintenance(self):
         """Reconcile/cancel-only access for baskets already submitted (works while execution is OFF; never submits)."""
@@ -199,7 +244,8 @@ class Workstation:
         risk = load_risk_usd(self.fvg_risk_path)
         out = {"strategy_active": self.active.is_fvg, "auto_execution": "OFF", "reason": None, "risk_usd": risk,
                "risk_configured": risk is not None, "account_currency": None, "equity_usd": None,
-               "risk_pct_of_equity": None, "armed_at": None}
+               "risk_pct_of_equity": None, "armed_at": None, "armed_by": None,
+               "default_on_for_demo_accounts": self._fvg_default_on_demo()}
         if not self.active.is_fvg:
             out["reason"] = "FVG is not the active strategy (inactive build)"
             return out
@@ -220,12 +266,15 @@ class Workstation:
             out["equity_usd"] = round(account.equity / units, 2)
             if risk and account.equity > 0:
                 out["risk_pct_of_equity"] = round(100 * risk / (account.equity / units), 2)
-        if saved and self.fvg_optin.matches(self._fvg_binding(account)):
+        out["account_type"] = {0: "demo", 1: "contest", 2: "real"}.get(getattr(account, "trade_mode", None), "unknown")
+        armed, why, how = self._fvg_armed(account, mt5)
+        if armed:
             out["auto_execution"] = "ON" if risk is not None else "OFF"
-            out["armed_at"] = saved.get("armed_at")
+            out["armed_by"] = how
+            out["armed_at"] = saved.get("armed_at") if how == "you" and saved else None
             out["reason"] = None if risk is not None else "risk not configured"
         else:
-            out["reason"] = "not armed" if not saved else "opt-in does not match the current source/symbol/account/version"
+            out["reason"] = why
         return out
 
     def trading_status(self, fvg: Optional[dict] = None) -> str:
@@ -242,6 +291,8 @@ class Workstation:
     def fvg_arm(self, enabled: bool) -> dict:
         if not enabled:
             self.fvg_optin.disarm()  # stops NEW submissions; accepted orders keep their broker SL/TP
+            self.fvg_user_off.parent.mkdir(parents=True, exist_ok=True)
+            self.fvg_user_off.write_text(json.dumps({"turned_off_at": datetime.now(UTC).isoformat()}), encoding="utf-8")
             return self.fvg_status()
         if not self.active.is_fvg or self.mode != "mt5":
             raise ValueError("automatic execution can only be armed while FVG is the active strategy on live MT5")
@@ -257,6 +308,10 @@ class Workstation:
         if account.margin_mode != getattr(mt5, "ACCOUNT_MARGIN_MODE_RETAIL_HEDGING", 2):
             raise ValueError("three independent targets need a hedging account; netting is not supported")
         self.fvg_optin.arm(self._fvg_binding(account), datetime.now(UTC))
+        try:
+            self.fvg_user_off.unlink()
+        except FileNotFoundError:
+            pass
         return self.fvg_status()
 
     def _make_delivery(self) -> Delivery:
