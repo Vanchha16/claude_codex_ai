@@ -15,7 +15,11 @@ separate, clearly labelled mode.
 
 ## Quick start
 
+Easiest: start your MT5 terminal, then double-click **`start.cmd`**. It starts the background server (or reports that
+it is already running) and opens the dashboard in your browser.
+
 ```bat
+start.cmd           :: double-click: start (if needed) + open the dashboard
 gold.cmd start      :: hidden background server; prints http://127.0.0.1:<port>/ (prefers 8000)
 gold.cmd status
 gold.cmd stop

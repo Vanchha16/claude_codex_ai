@@ -247,6 +247,22 @@ class MT5FvgExecutor:
                 raise ValueError(f"leg {leg.number}: stop distance {distance:.2f} is below spread {spread:.2f} + "
                                  f"{margin_ticks} tick(s); whole basket rejected")
 
+    def _call_blocker(self, mt5, payload: dict, eligibility: Optional[dict], clock: Callable[[], datetime],
+                      expires: datetime) -> Optional[str]:
+        """Per pending call: the bound account (re-read now) and the decision freshness. Not the whole-symbol exposure
+        check - this basket's own earlier accepted orders are expected exposure. The clock is a CALLABLE and is read
+        only AFTER the (potentially blocking) account lookup, i.e. immediately before the pending API call."""
+        try:
+            account = mt5.account_info()
+        except Exception:
+            account = None
+        if account is None:
+            return "the MT5 account is unavailable"
+        if account_id(account) != payload["account_id"] or account.login != self.policy.account_login \
+                or getattr(account, "server", None) != self.policy.account_server:
+            return "the connected MT5 server+login is no longer the bound account"
+        return self._ineligible(eligibility, clock(), expires)  # sampled after the last blocking call
+
     @staticmethod
     def _ineligible(eligibility: Optional[dict], at: datetime, expires: datetime) -> Optional[str]:
         """Decision context carried from the engine, re-checked with the CURRENT clock at every send boundary."""
@@ -346,16 +362,18 @@ class MT5FvgExecutor:
             accepted = {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED}
             for i, request in enumerate(requests):
                 leg = payload["legs"][i]
-                why = self._ineligible(eligibility, clock_now(), expires)
-                if why:  # immediately before THIS send: stale context never sends; accepted legs stay reconciled
+                leg["state"], payload["state"] = "sending", "submitting"
+                self.journal.save(plan_id, payload)  # written BEFORE order_send: a crash leaves "sending" = unknown
+                # per-call guard, AFTER the last blocking operation and directly before the API call: the account must
+                # still be the immutable original server+login, and the decision context must still be fresh
+                why = self._call_blocker(mt5, payload, eligibility, clock_now, expires)
+                if why:  # the call is known NOT to have happened: this and later legs are not_sent
                     for rest in payload["legs"][i:]:
                         rest["state"] = "not_sent"
-                    payload["state"] = "partial" if i else "rejected"
+                    payload["state"] = "partial" if i else "rejected"  # earlier legs here were accepted (else returned)
                     payload["reason"] = f"stopped before leg {leg['number']}: {why}"
                     self.journal.save(plan_id, payload)
                     return payload
-                leg["state"], payload["state"] = "sending", "submitting"
-                self.journal.save(plan_id, payload)  # written BEFORE order_send: a crash leaves "sending" = unknown
                 try:
                     result = mt5.order_send(request)
                 except Exception:
@@ -419,10 +437,12 @@ class MT5FvgExecutor:
         tb = self.timebase_fn()
         start = tb.to_broker(datetime.fromisoformat(payload["created_at"])) - timedelta(days=1)
         end = tb.to_broker(now) + timedelta(days=1)
+        self._check_owner(mt5.account_info(), payload)  # identity BEFORE collecting evidence ...
         pending = mt5.orders_get(symbol=payload["symbol"])
         positions = mt5.positions_get(symbol=payload["symbol"])
         history = mt5.history_orders_get(start, end)
         deals = mt5.history_deals_get(start, end)
+        self._check_owner(mt5.account_info(), payload)  # ... and AFTER it: a mixed-account snapshot is never adopted
         if pending is None or positions is None or history is None or deals is None:
             return  # cannot read now: keep the last known states
         states = {mt5.ORDER_STATE_PLACED: "pending", mt5.ORDER_STATE_STARTED: "pending",
@@ -494,45 +514,59 @@ class MT5FvgExecutor:
         self.journal.save(plan_id, payload)
 
     def cancel_remaining(self, plan_id: str, why: str, now: Optional[datetime] = None) -> Optional[dict]:
-        """Remove only THIS basket's still-pending orders (own magic/comment/ticket); never closes a position or touches
-        its broker SL/TP. Every attempt first reads the broker's CURRENT pending orders: a ticket is (re)removed only
-        while it is verifiably still pending and owned, so an earlier unknown/timeout removal is retried safely and a
-        removal that actually succeeded is never duplicated. payload["cancel_state"]:
-          "complete" - a successful re-read shows no owned pending order left for this plan;
+        """Remove only THIS basket's still-pending orders (own magic/comment/ticket) on its ORIGINAL server+login; never
+        closes a position or touches its broker SL/TP. Before EACH removal the original account is re-verified and the
+        broker's CURRENT pending orders are re-read (never a batch-old snapshot); identity is checked again after that
+        read. On an account switch the original-account progress is saved and OtherAccountError is raised before any
+        foreign ticket can be touched; recovery resumes when the original account returns. payload["cancel_state"]:
+          "complete" - a successful, identity-verified re-read shows no owned pending order left for this plan;
           "pending"  - owned pending orders remain (rejected/unknown removal): retry later;
           "unknown"  - the broker's pending orders could not be read (None): never assumed empty.
-        A successful removal proves only that the REMAINDER is gone; legs are re-read from fresh evidence."""
+        Practical limit: an external terminal account switch can still happen between the last check and the API call;
+        the checks are made immediately around every call and every evidence adoption."""
         with self.lock:
             payload = self.journal.get(plan_id)
             mt5 = self.mt5
             if payload is None or mt5 is None:
                 return payload
-            self._check_owner(mt5.account_info(), payload)
-            pending = mt5.orders_get(symbol=payload["symbol"])
-            if pending is None:
-                payload["cancel_state"] = "unknown"
+
+            def verified_pending():
+                self._check_owner(mt5.account_info(), payload)  # identity before the query ...
+                rows = mt5.orders_get(symbol=payload["symbol"])
+                self._check_owner(mt5.account_info(), payload)  # ... and after it, before the rows are trusted
+                return rows
+
+            try:
+                for leg in payload["legs"]:
+                    pending = verified_pending()  # fresh for EVERY removal
+                    if pending is None:
+                        payload["cancel_state"] = "unknown"
+                        self.journal.save(plan_id, payload)
+                        return payload
+                    live = [x for x in pending if self._owned(x, payload, leg)]
+                    if not live:
+                        continue  # nothing of this leg is pending now (filled/expired/removed): evidence decides below
+                    ticket = live[0].ticket
+                    leg["ticket"] = leg.get("ticket") or ticket
+                    self._check_owner(mt5.account_info(), payload)  # immediately before the removal call
+                    try:
+                        result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket, "magic": MAGIC})
+                    except Exception:
+                        result = None
+                    leg["cancel_attempts"] = int(leg.get("cancel_attempts", 0)) + 1
+                    if result is None or result.retcode in (mt5.TRADE_RETCODE_TIMEOUT, mt5.TRADE_RETCODE_CONNECTION):
+                        leg["cancel"] = "unknown"
+                    elif result.retcode == mt5.TRADE_RETCODE_DONE:
+                        leg["cancel"] = why  # remainder removed; the state comes from the evidence below
+                    else:
+                        leg["cancel"] = f"rejected ({result.retcode})"
+                    self.journal.save(plan_id, payload)  # original-account progress persisted after every call
+                self._refresh(mt5, plan_id, payload, now or self._now())
+                after = verified_pending()
+            except OtherAccountError:
+                payload["cancel_state"] = "unknown"  # unresolved until original-account evidence is available
                 self.journal.save(plan_id, payload)
-                return payload
-            for leg in payload["legs"]:
-                live = [x for x in pending if self._owned(x, payload, leg)]
-                if not live:
-                    continue  # nothing of this leg is pending now (filled/expired/removed): evidence decides below
-                ticket = live[0].ticket
-                leg["ticket"] = leg.get("ticket") or ticket
-                try:
-                    result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket, "magic": MAGIC})
-                except Exception:
-                    result = None
-                leg["cancel_attempts"] = int(leg.get("cancel_attempts", 0)) + 1
-                if result is None or result.retcode in (mt5.TRADE_RETCODE_TIMEOUT, mt5.TRADE_RETCODE_CONNECTION):
-                    leg["cancel"] = "unknown"
-                elif result.retcode == mt5.TRADE_RETCODE_DONE:
-                    leg["cancel"] = why  # remainder removed; the state comes from the evidence below
-                else:
-                    leg["cancel"] = f"rejected ({result.retcode})"
-            self.journal.save(plan_id, payload)
-            self._refresh(mt5, plan_id, payload, now or self._now())
-            after = mt5.orders_get(symbol=payload["symbol"])
+                raise
             if after is None:
                 payload["cancel_state"] = "unknown"
             else:

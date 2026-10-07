@@ -558,3 +558,240 @@ def test_c_invalid_raw_bar_never_invalidates(tmp_path):
     eng.manage_baskets([bad], far.close_time + timedelta(seconds=1))
     b = fstore.baskets()[0]
     assert not b.get("zone_invalidated_at") and broker.removed == [] and len(broker.orders) == 3
+
+
+# ===================================================================== task 20261007-165801: per-call guards
+class TwoAccountBroker(Broker):
+    """Fake terminal whose pending orders depend on the CONNECTED server+login (separate books per account)."""
+
+    def __init__(self):
+        self.books = {}
+        self.calls = []  # (kind, server, login, ticket/price)
+        super().__init__()
+
+    def _key(self):
+        account = getattr(self, "account", None)  # the base __init__ sets orders before the account exists
+        return (account.server, account.login) if account is not None else None
+
+    @property
+    def orders(self):
+        return self.books.get(self._key(), ())
+
+    @orders.setter
+    def orders(self, value):
+        self.books[self._key()] = tuple(value or ())
+
+    def order_send(self, request):
+        self.calls.append(("remove" if request["action"] == self.TRADE_ACTION_REMOVE else "pending",
+                           self.account.server, self.account.login, request.get("order", request.get("price"))))
+        return super().order_send(request)
+
+
+def _elig(confirm_close=None, setup_expires=None):
+    return {"confirm_close": confirm_close or T - timedelta(seconds=1),
+            "setup_expires": setup_expires or T + timedelta(hours=1), "max_age_seconds": 30}
+
+
+def _switch_after_first_pending(broker, **change):
+    real = broker.order_send
+
+    def send(request):
+        r = real(request)
+        if request["action"] == broker.TRADE_ACTION_PENDING and len(broker.requests) == 1:
+            for k, v in change.items():
+                setattr(broker.account, k, v)
+        return r
+    broker.order_send = send
+
+
+@pytest.mark.parametrize("change", [{"server": "Other-Server"}, {"login": LOGIN + 1}])
+def test_r1_r2_account_switch_after_the_first_accepted_pending_call(tmp_path, change):
+    broker = TwoAccountBroker()
+    _switch_after_first_pending(broker, **change)
+    journal = ExecutionJournal(tmp_path / "j.sqlite")
+    ex = MT5FvgExecutor(lambda: broker, journal, policy(), clock=lambda: T)
+    out = ex.submit("abc123", gap(), XMETA, T, T + timedelta(hours=2), eligibility=_elig())
+    assert [(c[1], c[2]) for c in broker.calls] == [(SERVER, LOGIN)]  # exactly one call, on the original account
+    assert [l["state"] for l in out["legs"]] == ["pending", "not_sent", "not_sent"] and out["state"] == "partial"
+    assert "no longer the bound account" in out["reason"]
+    assert out["account_id"] == account_id(NS(server=SERVER, login=LOGIN))  # original identity retained
+    assert ex.submit("abc123", gap(), XMETA, T, T + timedelta(hours=2), eligibility=_elig()) == out
+    assert len(broker.calls) == 1  # never resumed or resent
+
+
+def _clock_jump_on_sending_save(journal, clock, seconds, on_leg):
+    real = journal.save
+
+    def save(pid, payload):
+        legs = payload["legs"]
+        if payload.get("state") == "submitting" and legs[on_leg - 1]["state"] == "sending" and not clock.get("done"):
+            clock["t"] += timedelta(seconds=seconds)  # the durable pre-send write blocks
+            clock["done"] = True
+        return real(pid, payload)
+    journal.save = save
+
+
+def test_r3_slow_pre_send_journal_write_sends_nothing_stale(tmp_path):
+    broker = Broker()
+    clock = {"t": T}
+    journal = ExecutionJournal(tmp_path / "j.sqlite")
+    _clock_jump_on_sending_save(journal, clock, 45, on_leg=1)
+    ex = MT5FvgExecutor(lambda: broker, journal, policy(), clock=lambda: clock["t"])
+    broker.ticks = [NS(bid=111.0, ask=111.2, time=T.timestamp(), time_msc=int(T.timestamp() * 1000))]
+    out = ex.submit("abc123", gap(), XMETA, T, T + timedelta(hours=2), eligibility=_elig())
+    assert broker.requests == [] and out["state"] == "rejected"
+    assert [l["state"] for l in out["legs"]] == ["not_sent"] * 3  # despite the durable "sending" marker
+    assert journal.get("abc123")["legs"][0]["state"] == "not_sent"
+
+
+def test_r3b_slow_write_before_a_later_leg_keeps_the_accepted_leg(tmp_path):
+    broker = Broker()
+    clock = {"t": T}
+    journal = ExecutionJournal(tmp_path / "j.sqlite")
+    _clock_jump_on_sending_save(journal, clock, 45, on_leg=2)
+    ex = MT5FvgExecutor(lambda: broker, journal, policy(), clock=lambda: clock["t"])
+    out = ex.submit("abc123", gap(), XMETA, T, T + timedelta(hours=2), eligibility=_elig())
+    assert len(broker.requests) == 1 and out["state"] == "partial"
+    assert [l["state"] for l in out["legs"]] == ["pending", "not_sent", "not_sent"]
+
+
+@pytest.mark.parametrize("which", ["setup", "pending"])
+def test_r4_deadline_crossed_inside_the_pre_send_write_refuses_the_uncalled_leg(tmp_path, which):
+    broker = Broker()
+    clock = {"t": T}
+    journal = ExecutionJournal(tmp_path / "j.sqlite")
+    _clock_jump_on_sending_save(journal, clock, 25, on_leg=1)  # age 26 s stays <= 30 s: only the deadline is crossed
+    ex = MT5FvgExecutor(lambda: broker, journal, policy(), clock=lambda: clock["t"])
+    if which == "setup":
+        out = ex.submit("abc123", gap(), XMETA, T, T + timedelta(hours=2),
+                        eligibility=_elig(setup_expires=T + timedelta(seconds=20)))
+        assert "setup has expired" in out["reason"]
+    else:
+        out = ex.submit("abc123", gap(), XMETA, T, T + timedelta(seconds=20), eligibility=_elig())
+        assert "lifetime has already passed" in out["reason"]
+    assert broker.requests == [] and [l["state"] for l in out["legs"]] == ["not_sent"] * 3
+
+
+def _owned_book(broker, plan="abc123"):
+    return tuple(NS(ticket=100 + n, comment=leg_comment(plan, n), symbol=XMETA.name, magic=MAGIC,
+                    state=broker.ORDER_STATE_PLACED, volume_current=0.1) for n in (1, 2, 3))
+
+
+def test_r5_account_switch_between_removals_never_touches_foreign_orders(tmp_path):
+    broker = TwoAccountBroker()
+    journal = ExecutionJournal(tmp_path / "j.sqlite")
+    ex = MT5FvgExecutor(lambda: broker, journal, policy())
+    submit(ex, gap())
+    broker.orders = _owned_book(broker)
+    other = ("Other-Server", LOGIN)
+    broker.books[other] = tuple(NS(ticket=t, comment="manual", symbol=XMETA.name, magic=0,
+                                   state=broker.ORDER_STATE_PLACED, volume_current=1.0) for t in (102, 103))
+    real = broker.order_send
+
+    def send(request):
+        r = real(request)
+        if request["action"] == broker.TRADE_ACTION_REMOVE and len([c for c in broker.calls if c[0] == "remove"]) == 1:
+            broker.account.server = "Other-Server"  # the terminal switches right after the first removal
+        return r
+    broker.order_send = send
+    with pytest.raises(OtherAccountError):
+        ex.cancel_remaining("abc123", "zone invalidated", T)
+    removes = [c for c in broker.calls if c[0] == "remove"]
+    assert [(c[1], c[3]) for c in removes] == [(SERVER, 101)]  # nothing removed on the other server
+    assert [o.ticket for o in broker.books[other]] == [102, 103]  # foreign manual orders untouched
+    saved = journal.get("abc123")
+    assert saved["cancel_state"] == "unknown" and saved["legs"][0]["cancel"] == "zone invalidated"
+    broker.account.server = SERVER  # the original account returns
+    out = ex.cancel_remaining("abc123", "zone invalidated", T + timedelta(minutes=1))
+    removes = [c for c in broker.calls if c[0] == "remove"]
+    assert [(c[1], c[3]) for c in removes] == [(SERVER, 101), (SERVER, 102), (SERVER, 103)]  # 101 never repeated
+    assert out["cancel_state"] == "complete" and [o.ticket for o in broker.books[other]] == [102, 103]
+
+
+def test_r6_identity_switch_during_query_collection_is_never_adopted(tmp_path):
+    broker = TwoAccountBroker()
+    journal = ExecutionJournal(tmp_path / "j.sqlite")
+    ex = MT5FvgExecutor(lambda: broker, journal, policy())
+    submit(ex, gap())
+    broker.orders = _owned_book(broker)
+    before = journal.get("abc123")
+    real_history = broker.history_orders_get
+
+    def history_orders_get(*args):  # mid-collection switch; foreign history claims everything was cancelled
+        broker.account.server = "Other-Server"
+        return tuple(NS(**{**vars(o), "state": broker.ORDER_STATE_CANCELED}) for o in _owned_book(broker))
+    broker.history_orders_get = history_orders_get
+    with pytest.raises(OtherAccountError):
+        ex.reconcile("abc123", T)
+    assert journal.get("abc123")["legs"] == before["legs"]  # mixed-account evidence not adopted
+    broker.account.server = SERVER
+    broker.history_orders_get = real_history
+    real_get = TwoAccountBroker.orders.fget
+    reads = {"n": 0}
+
+    def flip_on_final_read(self):
+        reads["n"] += 1
+        rows = real_get(self)
+        if reads["n"] >= 5:  # the final completion read happens on another account
+            self.account.server = "Other-Server"
+        return rows
+    TwoAccountBroker.orders = property(flip_on_final_read, TwoAccountBroker.orders.fset)
+    try:
+        with pytest.raises(OtherAccountError):
+            ex.cancel_remaining("abc123", "zone invalidated", T)
+    finally:
+        TwoAccountBroker.orders = property(real_get, TwoAccountBroker.orders.fset)
+    assert journal.get("abc123")["cancel_state"] != "complete"  # never proven complete from a foreign snapshot
+
+
+# ===================================================================== task 20261007-192600: clock after the final lookup
+def _slow_final_lookup(broker, journal, clock, seconds, on_leg, plan="abc123"):
+    """account_info() blocks for `seconds` at the per-call guard of leg `on_leg` (after its durable "sending" save)."""
+    real = broker.account_info
+    state = {"done": False}
+
+    def account_info():
+        row = journal.get(plan)
+        if row and not state["done"] and row["legs"][on_leg - 1]["state"] == "sending":
+            clock["t"] += timedelta(seconds=seconds)
+            state["done"] = True
+        return real()
+    broker.account_info = account_info
+
+
+def test_p1_slow_final_lookup_before_leg_1_sends_nothing(tmp_path):
+    broker, clock = Broker(), {"t": T}
+    journal = ExecutionJournal(tmp_path / "j.sqlite")
+    _slow_final_lookup(broker, journal, clock, 45, on_leg=1)
+    ex = MT5FvgExecutor(lambda: broker, journal, policy(), clock=lambda: clock["t"])
+    out = ex.submit("abc123", gap(), XMETA, T, T + timedelta(hours=2), eligibility=_elig())
+    assert broker.requests == [] and out["state"] == "rejected"
+    assert [l["state"] for l in out["legs"]] == ["not_sent"] * 3 and "is 46s old" in out["reason"]
+
+
+def test_p2_slow_final_lookup_before_leg_2_keeps_only_the_timely_call(tmp_path):
+    broker, clock = Broker(), {"t": T}
+    journal = ExecutionJournal(tmp_path / "j.sqlite")
+    _slow_final_lookup(broker, journal, clock, 45, on_leg=2)
+    ex = MT5FvgExecutor(lambda: broker, journal, policy(), clock=lambda: clock["t"])
+    out = ex.submit("abc123", gap(), XMETA, T, T + timedelta(hours=2), eligibility=_elig())
+    assert len(broker.requests) == 1 and out["state"] == "partial"
+    assert [l["state"] for l in out["legs"]] == ["pending", "not_sent", "not_sent"]
+    assert ex.submit("abc123", gap(), XMETA, T, T + timedelta(hours=2), eligibility=_elig()) == out
+    assert len(broker.requests) == 1  # never resent
+
+
+@pytest.mark.parametrize("which", ["setup", "pending"])
+def test_p3_deadline_crossed_during_the_final_lookup_is_refused(tmp_path, which):
+    broker, clock = Broker(), {"t": T}
+    journal = ExecutionJournal(tmp_path / "j.sqlite")
+    _slow_final_lookup(broker, journal, clock, 25, on_leg=1)  # age 26 s stays <= 30 s: only the deadline is crossed
+    ex = MT5FvgExecutor(lambda: broker, journal, policy(), clock=lambda: clock["t"])
+    if which == "setup":
+        out = ex.submit("abc123", gap(), XMETA, T, T + timedelta(hours=2),
+                        eligibility=_elig(setup_expires=T + timedelta(seconds=20)))
+        assert "setup has expired" in out["reason"]
+    else:
+        out = ex.submit("abc123", gap(), XMETA, T, T + timedelta(seconds=20), eligibility=_elig())
+        assert "lifetime has already passed" in out["reason"]
+    assert broker.requests == [] and [l["state"] for l in out["legs"]] == ["not_sent"] * 3
