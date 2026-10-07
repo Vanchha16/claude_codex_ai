@@ -1,0 +1,9 @@
+{
+  "_comment": "Verified MT5 trade-server time offsets (broker epoch = UTC + offset), bound to the exact server name. Read by app/mt5_time.py. Add or change an entry ONLY after verifying advancing ticks and M5 rates against an independent UTC clock; a wrong value (e.g. after a DST change) makes quotes look stale/future so the app fails closed instead of trading. MetaQuotes-Demo: verified 2026-10-07T07:40-07:41Z, quote time_msc and the forming M5 bar were +10800 s ahead of host UTC (host clock matched an external HTTP Date header within 1 s) and advanced with wall time. Expect EET/EEST: re-verify after European DST ends (2026-10-25), when this server is expected to move to +2.",
+  "servers": {
+    "MetaQuotes-Demo": {
+      "utc_offset_hours": 3,
+      "verified_at": "2026-10-07T07:41:01Z"
+    }
+  }
+}

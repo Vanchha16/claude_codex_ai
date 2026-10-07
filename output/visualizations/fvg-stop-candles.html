@@ -1,0 +1,80 @@
+<div id="fvg-stop-candles-example">
+  <h3>Bullish FVG — example candles</h3>
+  <svg class="fvg-candle-diagram" role="img" aria-labelledby="fvg-candle-title fvg-candle-desc"></svg>
+  <div class="viz-row text-small">
+    <span><span class="fvg-key fvg-gap-key" aria-hidden="true"></span>FVG: 4200.00–4201.00</span>
+    <span><span class="fvg-key fvg-stop-key" aria-hidden="true"></span>Draft SL: 4199.98</span>
+  </div>
+  <div class="text-small">C1 high wick: 4200.00 · C1 close: 4199.80 · C1 low wick: 4199.00</div>
+  <div class="text-small text-muted">Illustrative prices · buffer assumes two ticks of 0.01</div>
+</div>
+<style>
+  #fvg-stop-candles-example .fvg-candle-diagram {display:block;width:100%;height:430px;overflow:visible;color:var(--foreground)}
+  #fvg-stop-candles-example .fvg-candle-diagram text {fill:var(--foreground);font-weight:400}
+  #fvg-stop-candles-example .fvg-key {display:inline-block;width:16px;height:3px;vertical-align:middle;margin-right:6px}
+  #fvg-stop-candles-example .fvg-gap-key {background:var(--viz-series-1)}
+  #fvg-stop-candles-example .fvg-stop-key {background:var(--viz-series-2)}
+</style>
+<script>
+(() => {
+  const root = document.getElementById('fvg-stop-candles-example');
+  const svg = root.querySelector('.fvg-candle-diagram');
+  const ns = 'http://www.w3.org/2000/svg';
+  const candles = [
+    {name:'C1', o:4199.40, h:4200.00, l:4199.00, c:4199.80},
+    {name:'C2', o:4199.80, h:4201.80, l:4199.50, c:4201.50},
+    {name:'C3', o:4201.50, h:4201.90, l:4201.00, c:4201.60}
+  ];
+  function node(tag, attrs, label) {
+    const e = document.createElementNS(ns, tag);
+    for (const [k,v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+    if (label !== undefined) e.textContent = label;
+    svg.appendChild(e);
+    return e;
+  }
+  function draw() {
+    const w = Math.max(280, Math.round(root.getBoundingClientRect().width));
+    const h = 430, left = 66, right = w - 10, top = 30, bottom = 385;
+    const inner = right - left;
+    const y = p => top + (4202.2 - p) / 3.4 * (bottom - top);
+    const x = i => left + inner * [0.12, 0.30, 0.48][i];
+    const bw = w < 440 ? 18 : 26;
+    svg.replaceChildren();
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    node('title', {id:'fvg-candle-title'}, 'Bullish three-candle FVG and shared stop placement');
+    node('desc', {id:'fvg-candle-desc'}, 'Candle one high wick is 4200, its close is 4199.80, and its low wick is 4199.00. Candle three low wick is 4201. The FVG is between 4200 and 4201. Three planned entries are at 4200.99, 4200.50 and 4200.20. The draft stop is 4199.98, just below the gap bottom, rather than below candle one low or at its close. These are illustrative prices.');
+    node('text', {x:4, y:16, class:'text-small'}, 'Price');
+    node('line', {x1:left,y1:top,x2:left,y2:bottom,stroke:'var(--border)'});
+    for (const p of [4199,4200,4201,4202]) {
+      node('line', {x1:left,y1:y(p),x2:right,y2:y(p),stroke:'var(--border)','stroke-width':1});
+      node('text', {x:left-9,y:y(p)+4,'text-anchor':'end',class:'text-small'}, p.toFixed(2));
+    }
+    node('rect', {x:x(0),y:y(4201),width:right-x(0),height:y(4200)-y(4201),fill:'var(--viz-series-1)','fill-opacity':0.12});
+    for (const p of [4200,4201]) node('line', {x1:x(0),y1:y(p),x2:right,y2:y(p),stroke:'var(--viz-series-1)','stroke-width':1.5});
+    candles.forEach((c,i) => {
+      node('line', {x1:x(i),y1:y(c.h),x2:x(i),y2:y(c.l),stroke:'var(--viz-series-1)','stroke-width':2});
+      const r = node('rect', {x:x(i)-bw/2,y:y(Math.max(c.o,c.c)),width:bw,height:Math.max(3,Math.abs(y(c.o)-y(c.c))),fill:'var(--viz-series-1)',
+                             'data-tooltip':`${c.name} · Open ${c.o.toFixed(2)} · High ${c.h.toFixed(2)} · Low ${c.l.toFixed(2)} · Close ${c.c.toFixed(2)}`});
+      r.setAttribute('aria-label', `${c.name} OHLC ${c.o}, ${c.h}, ${c.l}, ${c.c}`);
+      node('text', {x:x(i),y:411,'text-anchor':'middle',class:'text-small'}, c.name);
+    });
+    const labelX = left + inner*0.63;
+    for (const [pct,p] of [[1,4200.99],[50,4200.50],[80,4200.20]]) {
+      node('line', {x1:x(2)+bw/2+7,y1:y(p),x2:right,y2:y(p),stroke:'var(--foreground)','stroke-opacity':0.45,'stroke-dasharray':'3 4'});
+      // Keep labels off the line while retaining their exact price positions.
+      node('text', {x:labelX,y:y(p)-5,class:'text-small'}, `${pct}% · ${p.toFixed(2)}`);
+    }
+    node('circle', {cx:x(0),cy:y(4200),r:4,fill:'var(--foreground)', 'data-tooltip':'C1 HIGH WICK = lower FVG edge · 4200.00'});
+    node('circle', {cx:x(0)+bw/2,cy:y(4199.8),r:3,fill:'var(--muted-foreground)', 'data-tooltip':'C1 CLOSE · 4199.80'});
+    node('line', {x1:x(0),y1:y(4199.98),x2:right,y2:y(4199.98),stroke:'var(--viz-series-2)','stroke-width':2,'stroke-dasharray':'7 4'});
+    const leaderX = left + inner*0.76;
+    node('path', {d:`M ${leaderX} ${y(4199.98)} L ${leaderX} ${y(4199.98)+45} L ${labelX} ${y(4199.98)+45}`,
+                  fill:'none',stroke:'var(--viz-series-2)','stroke-width':1});
+    node('text', {x:labelX,y:y(4199.98)+62,class:'text-small'}, 'SL 4199.98');
+    node('text', {x:labelX,y:y(4199.98)+80,class:'text-small'}, 'Below FVG edge');
+    node('text', {x:left,y:428,class:'text-small'}, 'Three closed M15 candles');
+  }
+  new ResizeObserver(draw).observe(root);
+  draw();
+})();
+</script>

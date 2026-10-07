@@ -1,0 +1,7 @@
+# Python 3.12 (64-bit, Windows). Installed into the project-local .venv with a project-local pip cache.
+fastapi==0.142.2
+uvicorn==0.54.0
+httpx==0.28.1
+MetaTrader5==5.0.6231
+numpy==2.5.3
+pytest==9.1.1

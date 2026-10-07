@@ -1,0 +1,431 @@
+<!doctype html>
+<!-- VC Signal dashboard. Visual design modelled on the user's reference trading terminal; built on TailAdmin free
+     (MIT, Copyright (c) 2023 TailAdmin) design tokens/utilities, upstream commit 1bd2dc42a8467ae0281cf00bd0050da4c9c4be07.
+     See /static/dist/THIRD_PARTY_NOTICES.txt.
+     GENERATED from frontend/src/index.template.html by `gold.cmd build-ui`; edit the template, not this file. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VC Signal</title>
+  <meta name="session-token" content="__SESSION_TOKEN__">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <script>
+    // Theme: honour an explicit saved choice; new visitors (no saved preference) get the dark terminal theme.
+    (function () {
+      var dark = true;
+      try { var v = localStorage.getItem("darkMode"); if (v !== null) dark = JSON.parse(v) === true; } catch (e) {}
+      document.documentElement.classList.toggle("dark", dark);
+      // View: only the selected main view is painted, so there is no flash of all six sections on load.
+      var views = { "overview": "overview", "chart-section": "chart", "signals-section": "signals", "setups-section": "setups",
+        "replay-section": "replay", "system-section": "system" }, view = null, h = "";
+      try { h = decodeURIComponent(location.hash.slice(1)); } catch (e) {}
+      if (Object.prototype.hasOwnProperty.call(views, h)) view = views[h];
+      if (!view) { try { var sv = localStorage.getItem("vcSection"); for (var id in views) if (views[id] === sv) view = sv; } catch (e) {} }
+      document.documentElement.setAttribute("data-view", view || "overview");
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/dist/app.css">
+  <script defer src="/static/nav.js"></script>
+  <script defer src="/static/dist/lightweight-charts.standalone.production.js"></script>
+  <script defer src="/static/timefmt.js"></script>
+  <script defer src="/static/smc-zones.js"></script>
+  <script defer src="/static/market-chart.js"></script>
+  <script defer src="/static/fvg-display.js"></script>
+  <script defer src="/static/app.js"></script>
+  <script defer src="/static/dist/alpine.min.js"></script>
+</head>
+<body class="vc"
+  x-data="{ sidebarToggle: false, darkMode: document.documentElement.classList.contains('dark'), selected: VCNav.initial() }"
+  x-init="$watch('selected', v => VCNav.go(v)); $watch('darkMode', v => { document.documentElement.classList.toggle('dark', v); try { localStorage.setItem('darkMode', JSON.stringify(v)) } catch (e) {}; window.dispatchEvent(new Event('themechange')) })">
+  <a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-[100] focus:rounded-lg focus:bg-[var(--vc-surface)] focus:px-4 focus:py-2">Skip to content</a>
+  <div class="flex h-screen overflow-hidden">
+
+    <!-- ===================== Sidebar ===================== -->
+    <aside id="sidebar" aria-label="Main navigation"
+      :class="sidebarToggle ? 'translate-x-0 lg:w-[72px]' : '-translate-x-full lg:translate-x-0 lg:w-[248px]'"
+      class="vc-sidebar vc-scroll fixed inset-y-0 left-0 z-50 flex w-[248px] shrink-0 flex-col overflow-y-auto transition-[width,transform] duration-200 lg:static lg:translate-x-0"
+      @click.outside="if (window.innerWidth < 1024) sidebarToggle = false"
+      @keydown.escape.window="if (window.innerWidth < 1024) sidebarToggle = false">
+      <div class="flex h-14 shrink-0 items-center gap-3 px-4">
+        <a href="#overview" class="flex min-w-0 items-center gap-3" aria-label="VC Signal home" @click.prevent="selected = 'overview'; if (window.innerWidth < 1024) sidebarToggle = false">
+          <span class="vc-brand-mark flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] text-[12px] font-bold" aria-hidden="true">VS</span>
+          <span :class="sidebarToggle ? 'lg:hidden' : ''" class="min-w-0 leading-tight">
+            <span class="block truncate text-[15px] font-semibold">VC Signal</span>
+            <span class="block text-[10px] font-semibold tracking-[.12em] text-[var(--vc-primary)]">GOLD TERMINAL</span>
+          </span>
+        </a>
+        <button type="button" class="vc-btn vc-btn-icon ml-auto hidden h-7 w-7 border-0 bg-transparent lg:inline-flex" :class="sidebarToggle ? 'lg:hidden' : ''"
+          aria-label="Collapse sidebar" @click="sidebarToggle = true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+        </button>
+      </div>
+      <nav class="flex-1 px-3 pb-4">
+        <!-- Workspace -->
+        <p class="vc-nav-group mt-3 mb-2 px-2" :class="sidebarToggle ? 'lg:sr-only' : ''">Workspace</p>
+        <ul class="flex flex-col gap-0.5">
+          <li><a href="#overview" class="vc-nav-item" :class="selected === 'overview' ? 'vc-nav-active' : ''" :aria-current="selected === 'overview' ? 'location' : null" :title="sidebarToggle ? 'Overview' : null" @click.prevent="selected = 'overview'; if (window.innerWidth < 1024) sidebarToggle = false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg>
+            <span :class="sidebarToggle ? 'lg:hidden' : ''">Overview</span></a></li>
+          <li><a href="#chart-section" class="vc-nav-item" :class="selected === 'chart' ? 'vc-nav-active' : ''" :aria-current="selected === 'chart' ? 'location' : null" :title="sidebarToggle ? 'Chart' : null" @click.prevent="selected = 'chart'; if (window.innerWidth < 1024) sidebarToggle = false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4v3M7 17v3M17 4v5M17 19v1"/><rect x="5" y="7" width="4" height="10" rx="1"/><rect x="15" y="9" width="4" height="10" rx="1"/></svg>
+            <span :class="sidebarToggle ? 'lg:hidden' : ''">Chart</span></a></li>
+        </ul>
+        <!-- Signals -->
+        <p class="vc-nav-group mt-5 mb-2 px-2" :class="sidebarToggle ? 'lg:sr-only' : ''">Signals</p>
+        <ul class="flex flex-col gap-0.5">
+          <li><a href="#signals-section" class="vc-nav-item" :class="selected === 'signals' ? 'vc-nav-active' : ''" :aria-current="selected === 'signals' ? 'location' : null" :title="sidebarToggle ? 'Signals' : null" @click.prevent="selected = 'signals'; if (window.innerWidth < 1024) sidebarToggle = false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20v-3M9 20v-7M14 20v-11M19 20V4"/></svg>
+            <span :class="sidebarToggle ? 'lg:hidden' : ''">Signals</span></a></li>
+          <li><a href="#setups-section" class="vc-nav-item" :class="selected === 'setups' ? 'vc-nav-active' : ''" :aria-current="selected === 'setups' ? 'location' : null" :title="sidebarToggle ? 'Setups' : null" @click.prevent="selected = 'setups'; if (window.innerWidth < 1024) sidebarToggle = false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></svg>
+            <span :class="sidebarToggle ? 'lg:hidden' : ''">Setups</span></a></li>
+        </ul>
+        <!-- Research -->
+        <p class="vc-nav-group mt-5 mb-2 px-2" :class="sidebarToggle ? 'lg:sr-only' : ''">Research</p>
+        <ul class="flex flex-col gap-0.5">
+          <li><a href="#replay-section" class="vc-nav-item" :class="selected === 'replay' ? 'vc-nav-active' : ''" :aria-current="selected === 'replay' ? 'location' : null" :title="sidebarToggle ? 'Replay' : null" @click.prevent="selected = 'replay'; if (window.innerWidth < 1024) sidebarToggle = false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v4h4"/><path d="M12 8v4l3 2"/></svg>
+            <span :class="sidebarToggle ? 'lg:hidden' : ''">Replay</span></a></li>
+        </ul>
+        <!-- System -->
+        <p class="vc-nav-group mt-5 mb-2 px-2" :class="sidebarToggle ? 'lg:sr-only' : ''">System</p>
+        <ul class="flex flex-col gap-0.5">
+          <li><a href="#system-section" class="vc-nav-item" :class="selected === 'system' ? 'vc-nav-active' : ''" :aria-current="selected === 'system' ? 'location' : null" :title="sidebarToggle ? 'System' : null" @click.prevent="selected = 'system'; if (window.innerWidth < 1024) sidebarToggle = false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+            <span :class="sidebarToggle ? 'lg:hidden' : ''">System</span></a></li>
+          <li id="tool-taskpanel-item" hidden><a id="tool-taskpanel" href="#" target="_blank" rel="noopener" class="vc-nav-item" :title="sidebarToggle ? 'Task panel' : null">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+            <span :class="sidebarToggle ? 'lg:hidden' : ''">Task panel</span></a></li>
+        </ul>
+      </nav>
+      <p class="vc-faint mx-4 mb-4 text-[12px] leading-snug" :class="sidebarToggle ? 'lg:hidden' : ''">CRT and FastSweep: alerts only. FVG can send real pending orders when automatic execution is ON (default OFF). Research baseline; not proven profitable.</p>
+    </aside>
+    <!-- small-device overlay -->
+    <div @click="sidebarToggle = false" :class="sidebarToggle ? 'block lg:hidden' : 'hidden'" class="fixed inset-0 z-40 bg-black/50"></div>
+
+    <!-- ===================== Workspace ===================== -->
+    <div id="content" class="vc-workspace vc-scroll relative flex min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto">
+      <!-- Header -->
+      <header class="vc-header relative z-30 flex h-14 shrink-0 items-center gap-3 px-4 md:px-8 lg:sticky lg:top-0">
+        <button type="button" class="vc-btn vc-btn-icon lg:hidden" aria-label="Toggle navigation" aria-controls="sidebar" :aria-expanded="sidebarToggle.toString()" @click.stop="sidebarToggle = !sidebarToggle">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+        </button>
+        <button type="button" class="vc-btn vc-btn-icon hidden" :class="sidebarToggle ? 'lg:inline-flex' : ''" aria-label="Expand sidebar" @click="sidebarToggle = false">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+        <div class="flex min-w-0 items-center gap-2">
+          <span class="vc-brand-mark flex h-7 w-7 shrink-0 items-center justify-center rounded-[9px] text-[11px] font-bold lg:hidden" aria-hidden="true">VS</span>
+          <h1 class="sr-only text-[15px] font-semibold sm:not-sr-only sm:truncate">VC Signal</h1>
+          <span id="mode-badge" class="vc-chip vc-chip-light">loading…</span>
+          <span id="data-label" class="vc-muted hidden truncate text-[12px] xl:inline"></span>
+        </div>
+        <div class="ml-auto flex items-center gap-2">
+          <button id="btn-pause" type="button" class="vc-btn vc-btn-primary">Pause</button>
+          <button id="btn-demo-restart" type="button" hidden class="vc-btn hidden sm:inline-flex">Restart demo</button>
+          <button id="btn-mode" type="button" class="vc-btn hidden sm:inline-flex">Switch to MT5…</button>
+          <button type="button" class="vc-btn vc-btn-icon" :aria-label="darkMode ? 'Switch to light theme' : 'Switch to dark theme'" @click="darkMode = !darkMode">
+            <svg class="hidden dark:block" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+            <svg class="dark:hidden" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main id="main" class="mx-auto w-full max-w-[1600px] px-4 py-6 md:px-8">
+        <!-- Context shared by every view -->
+        <p class="vc-muted mb-2 text-[13px]"><span id="page-symbol" class="font-semibold text-[var(--vc-text)]">XAUUSD</span> · <span id="page-strategy">…</span> · <span id="page-source">loading…</span></p>
+        <div id="banner" role="status" hidden class="mb-4 rounded-[12px] border border-[color-mix(in_oklab,var(--vc-warning)_40%,transparent)] bg-[color-mix(in_oklab,var(--vc-warning)_12%,transparent)] px-4 py-3 text-[13px]"></div>
+
+        <!-- ===================== OVERVIEW ===================== -->
+        <section id="overview" class="vc-view" aria-labelledby="overview-title">
+          <div class="mb-5"><h2 id="overview-title" class="vc-title">Overview</h2><p class="vc-muted mt-1 text-[14px]">Strategy state, live quote, scanner, Telegram delivery and data source.</p></div>
+          <div class="vc-card">
+            <div class="flex items-start justify-between gap-3">
+              <h3 class="vc-card-title">Summary</h3>
+              <span id="strategy-chip" class="vc-chip vc-chip-light">—</span>
+            </div>
+            <div class="mt-3 grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+              <div class="min-w-0">
+                <p id="strategy-kicker" class="vc-kicker">Strategy state</p>
+                <p id="strategy-state" class="mt-1 text-[24px] leading-tight font-semibold capitalize">—</p>
+                <p id="strategy-detail" class="vc-muted mt-2 text-[14px]">—</p>
+              </div>
+              <a href="#chart-section" @click.prevent="selected = 'chart'" class="vc-btn self-start md:self-end">Open market chart</a>
+            </div>
+            <div class="vc-divider mt-4 grid gap-x-8 gap-y-2 pt-3 text-[13px] sm:grid-cols-3">
+              <p><span class="vc-muted">Session since</span> <span id="live-start" class="vc-num">—</span></p>
+              <p><span id="last-closed-label" class="vc-muted">Last closed</span> <span id="last-closed" class="vc-num">—</span></p>
+              <p><span class="vc-muted">Data checks</span> <span id="issues">—</span></p>
+            </div>
+          </div>
+
+          <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div class="vc-card">
+              <p class="vc-label">Bid / Ask <span id="ov-symbol" class="font-semibold text-[var(--vc-text)]"></span></p>
+              <p id="quote" class="vc-num mt-2 text-[22px] font-semibold">—</p>
+              <div class="mt-2 flex flex-wrap items-center gap-2 text-[12px]">
+                <span class="vc-muted">Spread <b id="spread" class="vc-num font-semibold text-[var(--vc-text)]">—</b></span>
+                <span id="quote-age" class="vc-chip vc-chip-light">—</span>
+              </div>
+              <p class="vc-faint mt-2 text-[12px]">Quote time <span id="quote-time" class="vc-num">—</span></p>
+            </div>
+            <div class="vc-card">
+              <p class="vc-label">Scanner</p>
+              <p id="scanner-state" class="mt-2 text-[22px] font-semibold">—</p>
+              <p class="vc-faint mt-2 text-[12px]">Last scan <span id="last-scan" class="vc-num">—</span></p>
+              <p id="sum-signals" class="vc-muted mt-1 text-[12px]">—</p>
+              <p id="sum-outcomes" class="vc-faint mt-1 text-[12px]"></p>
+            </div>
+            <div class="vc-card">
+              <p class="vc-label">Telegram</p>
+              <p id="tg-status" class="mt-2 text-[22px] font-semibold capitalize">—</p>
+              <p id="sum-delivery" class="vc-muted mt-2 text-[12px]">—</p>
+            </div>
+            <div class="vc-card">
+              <p class="vc-label">Data source</p>
+              <p id="provider" class="mt-2 truncate text-[15px] font-semibold">—</p>
+              <p id="broker" class="vc-muted mt-1 text-[12px] break-words">—</p>
+              <p id="symbol" class="vc-muted mt-1 text-[12px] break-words">—</p>
+              <p id="feed" class="vc-faint mt-1 text-[12px] break-words">—</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== CHART (TradingView Lightweight Charts) ===================== -->
+        <section id="chart-section" class="vc-view" aria-labelledby="chart-view-title">
+          <div class="mb-5"><h2 id="chart-view-title" class="vc-title">Chart</h2><p class="vc-muted mt-1 text-[14px]">Live candles with the active strategy&rsquo;s setup overlays, plus the selected record&rsquo;s details and evidence.</p></div>
+          <div id="chart-card" class="vc-card">
+            <div class="flex flex-wrap items-center gap-2">
+              <label class="vc-pill"><input id="ind-ema20" type="checkbox" class="sr-only"> EMA20</label>
+              <label class="vc-pill"><input id="ind-ema50" type="checkbox" class="sr-only"> EMA50</label>
+              <label class="vc-pill"><input id="ind-volume" type="checkbox" class="sr-only"> Tick volume</label>
+              <span class="vc-pill-sep" aria-hidden="true"></span>
+              <label class="vc-pill vc-zone-pill vc-zone-fvg" title="Fair Value Gap (cyan): a 3-candle price gap of at least one tick. ▲ bullish, ▼ bearish"><input id="ind-fvg" type="checkbox" class="sr-only"><span class="vc-swatch" aria-hidden="true"></span> FVG</label>
+              <label class="vc-pill vc-zone-pill vc-zone-ifvg" title="Inverse Fair Value Gap (purple): an FVG that price closed through, now acting the other way. ▲ bullish, ▼ bearish"><input id="ind-ifvg" type="checkbox" class="sr-only"><span class="vc-swatch" aria-hidden="true"></span> IFVG</label>
+              <label class="vc-pill vc-zone-pill vc-zone-ob" title="Order Block (amber): the last opposite-colour candle before a close beyond the latest confirmed swing. ▲ bullish, ▼ bearish"><input id="ind-ob" type="checkbox" class="sr-only"><span class="vc-swatch" aria-hidden="true"></span> OB</label>
+              <label class="vc-pill vc-zone-pill vc-zone-bb" title="Breaker Block (rose): an order block that price closed through, now acting the other way. ▲ bullish, ▼ bearish"><input id="ind-bb" type="checkbox" class="sr-only"><span class="vc-swatch" aria-hidden="true"></span> BB</label>
+              <span class="vc-zone-opts">
+                <label for="zone-cap" class="vc-faint">Recent</label>
+                <select id="zone-cap" class="vc-zone-select" title="How many zones of each type to draw (newest active first)">
+                  <option value="3">3 per type</option><option value="5">5 per type</option><option value="10">10 per type</option>
+                </select>
+                <label class="vc-pill vc-zone-pill vc-zone-hist" title="Also draw recently ended zones (faded), within the same per-type limit"><input id="zone-history" type="checkbox" class="sr-only"> History</label>
+              </span>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+              <span id="zone-counts" class="vc-muted" aria-live="polite">Zones: —</span>
+              <span class="vc-faint">Visual aids only; not strategy rules.</span>
+              <details class="vc-help">
+                <summary>About zones</summary>
+                <div class="vc-help-body">
+                  <p><b>FVG</b> (Fair Value Gap): three candles where the 3rd candle&rsquo;s low is at least one tick above the 1st candle&rsquo;s high (bullish), or its high at least one tick below the 1st candle&rsquo;s low (bearish). Drawn from the 3rd candle.</p>
+                  <p><b>IFVG</b> (Inverse Fair Value Gap): an FVG that a candle <i>closed</i> through on the other side; it flips direction from that candle on.</p>
+                  <p><b>OB</b> (Order Block): when a candle closes beyond the latest confirmed swing high/low (2 candles on each side), the last opposite-colour candle before it (up to 20 back) becomes the zone. A price-structure convention, not proof of institutional orders.</p>
+                  <p><b>BB</b> (Breaker Block): an order block that a candle closed through; it flips direction from that candle on.</p>
+                  <p>Colours show the type: <span class="vc-legend vc-zone-fvg">FVG</span> <span class="vc-legend vc-zone-ifvg">IFVG</span> <span class="vc-legend vc-zone-ob">OB</span> <span class="vc-legend vc-zone-bb">BB</span>; the badge arrow shows direction (▲ bullish, ▼ bearish).</p>
+                  <p>Zones end only on a candle <i>close</i> beyond them (wicks don&rsquo;t count). They are built from closed candles of the current timeframe and the history loaded on the chart. By default the newest 3 <i>active</i> zones of each type are drawn; choose 3/5/10, or turn on History to also show recently ended zones (faded). &ldquo;FVG 3/14&rdquo; means 3 drawn of 14 active. Not used by CRT-SMC-v1 signals or Telegram.</p>
+                </div>
+              </details>
+            </div>
+            <div class="mt-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div class="min-w-0">
+                <h3 id="chart-title-h" class="vc-card-title">Price Chart <span id="chart-symbol" class="vc-muted font-normal"></span></h3>
+                <p id="chart-status" role="status" aria-live="polite" class="vc-muted mt-0.5 text-[12px]">Loading…</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <div id="tf-buttons" role="group" aria-label="Chart timeframe" class="vc-seg"></div>
+                <button id="btn-chart-reset" type="button" class="vc-btn" title="Reset zoom and price scale">Reset</button>
+                <button id="btn-chart-live" type="button" class="vc-btn" title="Return to the current market (latest candles)">Live</button>
+                <button id="btn-chart-full" type="button" class="vc-btn" aria-pressed="false">Expand</button>
+              </div>
+            </div>
+            <div id="chart-wrap" class="vc-chart-frame relative mt-3 w-full">
+              <div id="lw-chart" class="lw-chart w-full" role="img" aria-label="Candlestick chart; numeric readout below"></div>
+            </div>
+            <p id="ohlc-readout" class="vc-num mt-2 font-mono text-[12px] break-words" aria-live="off">—</p>
+            <p class="vc-faint mt-1 text-[12px]">Times in <span id="tz-label">UTC</span> · Data: your local MT5 terminal (or the fictional demo fixture) · Charting by
+              <a class="underline hover:text-[var(--vc-primary)]" href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView</a> Lightweight Charts™.</p>
+          </div>
+
+          <div class="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+            <div class="vc-card">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div id="detail-tabs" role="tablist" aria-label="Details" class="vc-tabs">
+                  <button type="button" role="tab" class="vc-tab" data-tab="summary" aria-selected="true">Summary</button>
+                  <button type="button" role="tab" class="vc-tab" data-tab="setup" aria-selected="false">Setup</button>
+                  <button type="button" role="tab" class="vc-tab" data-tab="signal" aria-selected="false">Signal</button>
+                </div>
+                <span id="detail-scope" class="vc-chip vc-chip-light">Live market</span>
+              </div>
+              <div id="detail-body" role="tabpanel" class="mt-4 text-[14px] leading-relaxed">—</div>
+            </div>
+            <div class="vc-card">
+              <h3 class="vc-card-title">Evidence</h3>
+              <p class="vc-faint mt-0.5 text-[12px]">Rule checks taken from VC Signal's own records — not AI output.</p>
+              <div id="evidence" class="vc-evidence mt-4">—</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== SIGNALS ===================== -->
+        <section id="signals-section" class="vc-view" aria-labelledby="signals-title">
+          <div class="mb-5"><h2 id="signals-title" class="vc-title">Signals</h2><p class="vc-muted mt-1 text-[14px]">Simulated outcomes (price observations), not broker fills. Select a row to chart it.</p></div>
+          <div class="vc-card">
+            <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <h3 class="vc-card-title">Signal records</h3>
+              <div class="flex flex-wrap gap-2">
+                <label class="sr-only" for="f-sig-dir">Filter signals by side</label>
+                <select id="f-sig-dir" class="vc-input w-auto"><option value="">All sides</option><option>BUY</option><option>SELL</option></select>
+                <label class="sr-only" for="f-sig-out">Filter signals by outcome</label>
+                <select id="f-sig-out" class="vc-input w-auto"><option value="">All outcomes</option><option value="active">active</option><option value="tp">tp</option><option value="sl">sl</option><option value="expired">expired</option><option value="ambiguous">ambiguous</option></select>
+              </div>
+            </div>
+            <div class="vc-table-wrap vc-scroll max-h-[440px]">
+              <table id="signals" class="vc-table">
+                <thead><tr>{{TH:Signal|Side|Entry|SL|TP|R:R|Confirmed|Outcome|R|Delivery|Message}}</tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="msg-preview-wrap" hidden class="vc-inset mt-4 p-4">
+              <div class="mb-2 flex items-center justify-between gap-2">
+                <h3 class="vc-card-title">Telegram message preview</h3>
+                <button id="btn-close-preview" type="button" class="vc-btn h-8">Close</button>
+              </div>
+              <pre id="msg-preview" class="vc-scroll overflow-x-auto font-mono text-[12px] whitespace-pre-wrap"></pre>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== SETUPS ===================== -->
+        <section id="setups-section" class="vc-view" aria-labelledby="setups-title">
+          <div class="mb-5"><h2 id="setups-title" class="vc-title">Setups &amp; lifecycle</h2><p class="vc-muted mt-1 text-[14px]">Every evaluated A/B range with its state and reason. Select a directional setup to chart it.</p></div>
+          <div class="vc-card">
+            <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <h3 class="vc-card-title">Evaluated ranges</h3>
+              <div>
+                <label class="sr-only" for="f-cand-status">Filter setups by state</label>
+                <select id="f-cand-status" class="vc-input w-auto"><option value="">All states</option><option>pending</option><option>confirmed</option><option>invalidated</option><option>expired</option><option>rejected</option></select>
+              </div>
+            </div>
+            <div class="vc-table-wrap vc-scroll max-h-[440px]">
+              <table id="candidates" class="vc-table">
+                <thead><tr>{{TH:A candle|Side|A range|Sweep|Level|State|Reason}}</tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== REPLAY ===================== -->
+        <section id="replay-section" class="vc-view" aria-labelledby="replay-title">
+          <div class="mb-5"><h2 id="replay-title" class="vc-title">Replay</h2><p class="vc-muted mt-1 text-[14px]">Chronological replay with a held-out last 30%. Simulated price observations, not fills; never used to tune the rules.</p></div>
+          <div class="vc-card">
+            <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+              <h3 class="vc-card-title">Replay run</h3>
+              <div class="flex flex-wrap items-end gap-2">
+                <div><label for="replay-strategy" class="vc-label mb-1 block">Strategy</label>
+                  <select id="replay-strategy" class="vc-input w-auto"><option value="crt">CRT-SMC-v1 (legacy)</option><option value="fastsweep">FastSweep (active profile)</option></select></div>
+                <div><label for="replay-source" class="vc-label mb-1 block">Data</label>
+                  <select id="replay-source" class="vc-input w-auto"><option value="demo">Demo fixture (fictional)</option><option value="mt5">Real MT5 history</option></select></div>
+                <div><label for="replay-days" class="vc-label mb-1 block">Days (MT5)</label>
+                  <input id="replay-days" type="number" min="1" max="60" value="60" class="vc-input w-24"></div>
+                <label class="vc-pill mb-1.5"><input id="replay-ticks" type="checkbox" class="sr-only"> Use ticks</label>
+                <button id="btn-replay" type="button" class="vc-btn vc-btn-primary h-10">Run replay</button>
+              </div>
+            </div>
+            <div id="replay" class="mt-4 text-[14px]"><p class="vc-muted">Loading replay…</p></div>
+          </div>
+        </section>
+
+        <!-- ===================== SYSTEM ===================== -->
+        <section id="system-section" class="vc-view" aria-labelledby="system-title">
+          <div class="mb-5"><h2 id="system-title" class="vc-title">System</h2><p class="vc-muted mt-1 text-[14px]">Data source and symbol setup, Telegram delivery, strategy configuration and the event log.</p></div>
+          <div class="grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
+            <form id="setup-form" class="vc-card" novalidate>
+              <div class="mb-4 flex flex-wrap items-baseline justify-between gap-2">
+                <h3 class="vc-card-title">Setup</h3>
+                <span id="setup-account" class="vc-faint text-[12px]"></span>
+              </div>
+              <div class="grid gap-4 sm:grid-cols-2">
+                <div><label for="setup-source" class="vc-label mb-1.5 block">Data source</label>
+                  <select id="setup-source" class="vc-input"><option value="mt5">Live MT5 terminal (read-only)</option><option value="demo">Demo fixture (fictional)</option></select></div>
+                <div><label for="setup-symbol" class="vc-label mb-1.5 block">Exact broker symbol</label>
+                  <div class="flex gap-2"><select id="setup-symbol" class="vc-input"><option value="">— choose —</option></select>
+                  <button id="btn-discover" type="button" class="vc-btn h-10 shrink-0">Find</button></div></div>
+                <div class="sm:col-span-2"><label for="setup-terminal" class="vc-label mb-1.5 block">MT5 terminal path (optional, terminal64.exe)</label>
+                  <input id="setup-terminal" type="text" autocomplete="off" spellcheck="false" placeholder="C:\Program Files\MetaTrader 5\terminal64.exe" class="vc-input"></div>
+                <div><label for="setup-chat" class="vc-label mb-1.5 block">Telegram destination chat ID</label>
+                  <input id="setup-chat" type="text" inputmode="numeric" autocomplete="off" placeholder="-100…" class="vc-input"></div>
+                <div><label for="setup-tz" class="vc-label mb-1.5 block">Display time zone</label>
+                  <select id="setup-tz" class="vc-input"><option value="UTC">UTC</option><option value="Asia/Bangkok">Asia/Bangkok (UTC+7)</option><option value="local">This browser's zone</option><option value="Europe/London">Europe/London</option><option value="America/New_York">America/New_York</option></select></div>
+              </div>
+              <p id="setup-help" class="vc-faint mt-3 text-[12px]">Bot token: <span id="setup-token">—</span>. Tokens stay server-side in .venv/.env or .env and are never shown here. Changing source or symbol starts a new scanner session; history is kept per symbol.</p>
+              <p id="setup-msg" role="status" class="mt-2 text-[13px]"></p>
+              <div class="mt-4"><button id="btn-setup-save" type="submit" class="vc-btn vc-btn-primary">Save setup</button></div>
+            </form>
+            <div class="vc-card">
+              <h3 class="vc-card-title mb-3">Telegram</h3>
+              <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-[13px]">
+                <dt class="vc-muted">Bot</dt><dd id="tg-bot" class="break-words">—</dd>
+                <dt class="vc-muted">Destination</dt><dd id="tg-dest" class="break-words">—</dd>
+                <dt class="vc-muted">Delivery</dt><dd id="tg-delivery">—</dd>
+              </dl>
+              <p id="tg-help" class="vc-faint mt-3 text-[12px]">Delivery stays off until you enable it. Live signals are labelled LIVE MARKET SIGNAL; demo signals DEMO TEST SIGNAL.</p>
+              <div class="mt-4 flex flex-wrap items-center gap-2">
+                <button id="btn-tg-verify" type="button" class="vc-btn">Verify bot &amp; destination</button>
+                <button id="btn-tg-test" type="button" class="vc-btn">Send labeled test message</button>
+                <label class="vc-pill"><input type="checkbox" id="tg-enabled" class="sr-only"> External delivery</label>
+              </div>
+              <p id="tg-note" class="vc-faint mt-2 text-[12px]"></p>
+            </div>
+            <div class="vc-card">
+              <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+                <h3 class="vc-card-title">Strategy config</h3>
+                <span id="cfg-version" class="vc-faint vc-num text-[12px]"></span>
+              </div>
+              <dl id="config" class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 text-[12px]"></dl>
+              <p class="vc-faint mt-3 text-[12px]">Edit <code>config/strategy.json</code> and restart to change thresholds. Values are testing defaults, not optimised parameters.</p>
+            </div>
+            <div id="fvg-card" class="vc-card xl:col-span-2">
+              <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+                <h3 class="vc-card-title">FVG automatic execution</h3>
+                <span id="fvg-auto" class="vc-chip">OFF</span>
+              </div>
+              <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-[13px]">
+                <dt class="vc-muted">Strategy</dt><dd id="fvg-strategy">—</dd>
+                <dt class="vc-muted">Status</dt><dd id="fvg-reason" class="break-words">—</dd>
+                <dt class="vc-muted">Combined risk budget</dt><dd id="fvg-budget" class="vc-num">—</dd>
+                <dt class="vc-muted">Per leg (3 equal shares)</dt><dd id="fvg-share" class="vc-num">—</dd>
+                <dt class="vc-muted">Share of equity</dt><dd id="fvg-pct" class="vc-num">—</dd>
+              </dl>
+              <p class="vc-faint mt-3 text-[12px]">FVG-Trend-M15-M5 places three pending limit orders (1% / 50% / 80% of the gap) with one common stop and a 1:2 target each, sized so the three planned stop losses total the fixed budget (lots rounded down; fees, gaps and slippage can make losses larger). It is OFF by default, only available while FVG is the active strategy on live MT5, and bound to this source, symbol, account and strategy version. CRT and FastSweep stay alert-only and never trade.</p>
+              <label class="mt-3 flex items-start gap-2 text-[13px]"><input type="checkbox" id="fvg-confirm" class="mt-0.5"> <span>I understand this lets the app send real pending orders to my MT5 account automatically, without asking per trade.</span></label>
+              <div class="mt-3 flex flex-wrap items-center gap-2">
+                <button id="btn-fvg-arm" type="button" class="vc-btn vc-btn-primary" disabled>Turn automatic execution ON</button>
+                <button id="btn-fvg-disarm" type="button" class="vc-btn" disabled>Turn OFF</button>
+              </div>
+              <p id="fvg-msg" role="status" class="mt-2 text-[13px]"></p>
+              <div id="fvg-baskets-wrap" class="mt-4 hidden">
+                <h4 class="vc-label mb-2">Baskets</h4>
+                <div class="vc-scroll overflow-x-auto"><table class="vc-table w-full text-[12px]">
+                  <thead><tr>{{TH:Placed|Side|Zone|Legs (entry · TP · lots · planned loss)|SL|Status|Execution}}</tr></thead>
+                  <tbody id="fvg-baskets"></tbody></table></div>
+              </div>
+            </div>
+            <div class="vc-card">
+              <h3 class="vc-card-title mb-3">Event log</h3>
+              <ul id="events" class="vc-scroll max-h-80 overflow-y-auto text-[12px]" aria-live="polite"></ul>
+            </div>
+          </div>
+        </section>
+
+        <footer class="vc-faint mt-10 mb-4 text-center text-[12px]">
+          Local tool: CRT and FastSweep are alerts and simulated outcomes only and never trade. The opt-in FVG strategy can place pending limit orders only after you explicitly turn its automatic execution ON (default OFF). Demo prices are fictional.
+          UI built with <a class="underline hover:text-[var(--vc-primary)]" href="/static/dist/THIRD_PARTY_NOTICES.txt">TailAdmin free (MIT)</a> tokens, Inter Tight (OFL);
+          charts by <a class="underline hover:text-[var(--vc-primary)]" href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView</a> Lightweight Charts™ (Apache-2.0) — <a class="underline hover:text-[var(--vc-primary)]" href="/static/dist/THIRD_PARTY_NOTICES.txt">notices</a>.
+        </footer>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

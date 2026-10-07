@@ -1,0 +1,105 @@
+<div id="fvg-edge-wick-example-20261007">
+  <h3>SELL example: gap edge vs highest wick</h3>
+  <div class="viz-row text-small text-muted">
+    <span>Illustrative prices · not a live signal</span>
+    <span>FVG 4147.80–4149.40</span>
+    <span>Example tick 0.01 · buffer 0.02</span>
+  </div>
+  <svg class="stop-example" role="img" aria-labelledby="fvg-edge-wick-title fvg-edge-wick-description"></svg>
+  <div class="viz-row text-small">
+    <span>C1 high: 4153.00</span>
+    <span>C1 close: 4150.20</span>
+    <span>C1 low / FVG top: 4149.40</span>
+  </div>
+</div>
+<style>
+#fvg-edge-wick-example-20261007 .stop-example { display: block; width: 100%; }
+#fvg-edge-wick-example-20261007 .stop-example text { fill: var(--foreground); font-size: 12px; font-weight: 400; }
+#fvg-edge-wick-example-20261007 .frame { fill: none; stroke: var(--border); stroke-width: 1; }
+#fvg-edge-wick-example-20261007 .wick { stroke: var(--foreground); stroke-width: 1.5; }
+#fvg-edge-wick-example-20261007 .body { fill: var(--foreground); }
+#fvg-edge-wick-example-20261007 .gap { fill: var(--viz-series-1); opacity: 0.12; }
+#fvg-edge-wick-example-20261007 .entry { stroke: var(--viz-series-1); stroke-width: 1; }
+#fvg-edge-wick-example-20261007 .stop { stroke: var(--red); stroke-width: 2; }
+#fvg-edge-wick-example-20261007 .pattern-stop { stroke-dasharray: 6 4; }
+#fvg-edge-wick-example-20261007 .tick { stroke: var(--border); stroke-width: 1; }
+#fvg-edge-wick-example-20261007 .close-marker { fill: var(--background); stroke: var(--foreground); stroke-width: 1.5; }
+</style>
+<script>
+(() => {
+  const root = document.getElementById('fvg-edge-wick-example-20261007');
+  const svg = root.querySelector('.stop-example');
+  const ns = 'http://www.w3.org/2000/svg';
+  const candles = [
+    { open: 4152.00, high: 4153.00, low: 4149.40, close: 4150.20 },
+    { open: 4150.20, high: 4150.50, low: 4146.50, close: 4147.00 },
+    { open: 4147.00, high: 4147.80, low: 4142.50, close: 4143.00 }
+  ];
+  const bottom = candles[2].high;
+  const top = candles[0].low;
+  const tick = 0.01;
+  const buffer = 0.02;
+  const stops = [
+    { price: top + buffer, label: 'Edge SL', style: '' },
+    { price: Math.max(...candles.map(c => c.high)) + buffer, label: 'Wick SL', style: 'pattern-stop' }
+  ];
+  const entries = [1, 50, 80].map(depth => ({ depth, price: Math.ceil((bottom + (top - bottom) * depth / 100) / tick - 1e-8) * tick }));
+  const prices = [...candles.flatMap(c => [c.high, c.low]), ...stops.map(s => s.price)];
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const padding = (max - min) * 0.05;
+  function add(name, attributes, text) {
+    const element = document.createElementNS(ns, name);
+    Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, value));
+    if (text !== undefined) element.textContent = text;
+    svg.appendChild(element);
+    return element;
+  }
+  function draw() {
+    const width = Math.max(280, root.getBoundingClientRect().width);
+    const height = 482;
+    const left = 68;
+    const right = width - 10;
+    const upper = 36;
+    const lower = 422;
+    const labelX = Math.max(166, width * 0.56);
+    const firstX = left + 14;
+    const thirdX = labelX - 36;
+    const step = (thirdX - firstX) / 2;
+    const bodyWidth = Math.min(28, step * 0.55);
+    const y = price => upper + (max + padding - price) / (max - min + padding * 2) * (lower - upper);
+    svg.replaceChildren();
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('height', height);
+    add('title', { id: 'fvg-edge-wick-title' }, 'Two alternative sell stops on the same three-candle FVG');
+    add('desc', { id: 'fvg-edge-wick-description' }, 'The FVG is from candle one low 4149.40 to candle three high 4147.80. The current edge rule puts the shared stop at 4149.42, inside candle one lower wick. The alternative highest-wick rule puts the stop at 4153.02, above all three candle highs. Candle one closes at 4150.20. Entries at 1, 50 and 80 percent are 4147.82, 4148.60 and 4149.08. Example tick and buffer only.');
+    add('rect', { class: 'frame', 'data-chart-frame': '', x: left, y: upper, width: right - left, height: lower - upper });
+    add('text', { class: 'axis-title', 'data-axis': 'y', x: 8, y: 17 }, 'USD/oz');
+    add('text', { class: 'axis-title', 'data-axis': 'x', x: (left + right) / 2, y: 474, 'text-anchor': 'middle' }, 'Three closed candles');
+    [4153.00, 4150.20, 4149.40, 4147.80, 4145.00, 4143.00].forEach(price => {
+      add('line', { class: 'tick', x1: left - 4, x2: left, y1: y(price), y2: y(price) });
+      add('text', { x: left - 7, y: y(price) + 4, 'text-anchor': 'end' }, price.toFixed(2));
+    });
+    add('rect', { class: 'gap', x: firstX, y: y(top), width: right - firstX, height: y(bottom) - y(top), 'data-tooltip': 'Bearish FVG: C1 low 4149.40 to C3 high 4147.80' });
+    candles.forEach((candle, index) => {
+      const x = firstX + step * index;
+      add('line', { class: 'wick', x1: x, x2: x, y1: y(candle.high), y2: y(candle.low) });
+      add('rect', { class: 'body', x: x - bodyWidth / 2, y: y(candle.open), width: bodyWidth, height: y(candle.close) - y(candle.open), 'data-tooltip': `C${index + 1}: high ${candle.high.toFixed(2)}, low ${candle.low.toFixed(2)}, close ${candle.close.toFixed(2)}` });
+      add('text', { x, y: 445, 'text-anchor': 'middle' }, `C${index + 1}`);
+    });
+    entries.forEach(entry => {
+      add('line', { class: 'entry', x1: thirdX + bodyWidth / 2 + 5, x2: labelX - 8, y1: y(entry.price), y2: y(entry.price) });
+      if (labelX + 95 < right) add('line', { class: 'entry', x1: labelX + 95, x2: right, y1: y(entry.price), y2: y(entry.price) });
+      const labelOffset = entry.depth === 80 ? 0 : entry.depth === 50 ? 5 : 4;
+      add('text', { x: labelX, y: y(entry.price) + labelOffset }, `${entry.depth}% · ${entry.price.toFixed(2)}`);
+    });
+    stops.forEach(stop => {
+      add('line', { class: `stop ${stop.style}`, x1: firstX, x2: right, y1: y(stop.price), y2: y(stop.price) });
+      add('text', { x: labelX, y: y(stop.price) - 10 }, `${stop.label} ${stop.price.toFixed(2)}`);
+    });
+    add('circle', { class: 'close-marker', cx: firstX, cy: y(candles[0].close), r: 3, 'data-tooltip': 'C1 close: 4150.20' });
+  }
+  draw();
+  new ResizeObserver(draw).observe(root);
+})();
+</script>

@@ -1,0 +1,20 @@
+# Codex review observations for the active FVG build
+
+Document type: INFORMATIONAL REVIEW FEEDBACK ONLY. This is not another execution task.
+Author: Codex (planner/reviewer), not a Claude report.
+Observed at: 2026-10-07T06:40:53.685497+00:00
+Parent approved Task ID: 20261007-111856-fvg-three-entry-engine
+Authoritative source: `prompt/20261007-111856-fvg-three-entry-engine.md`
+Reply remains: `report/20261007-111856-fvg-three-entry-engine-report.md`
+
+These are observations from the intermediate source while you implement the already approved task. Please check them against its existing acceptance criteria before your final report. They do not change the task, add scope, authorize activation, or request a duplicate run. If you have already corrected an observation, cover it in your normal validation/report.
+
+1. **Invalidation before retest.** In `advance_setup`, the pending-state far-edge break is checked only when the bar intersects the zone. An isolated, broker-free check with a BUY zone [100,110] and the immediately next contiguous valid M5 candle O=99, H=99.5, L=98, C=99 returns `pending`; approved rule 3 requires `invalidated`, even when the entire candle gaps beyond the zone. Cover BUY/SELL and far-edge invalidation before first touch as well as after retest.
+2. **Pending-order filling policy.** The intermediate adapter chooses FOK/IOC from symbol flags. Official MQL5 Order Properties explicitly says pending requests should use `ORDER_FILLING_RETURN` regardless of the execution type: https://www.mql5.com/en/docs/constants/tradingconstants/orderproperties (pending-order paragraph after the execution/filling table). The request is `TRADE_ACTION_PENDING`; check this against the installed Python API and fake-broker tests rather than market-order policy.
+3. **Recovery across both durable stores.** `_on_confirmed` creates a basket with `execution=None`; the executor commits its journal and sends orders; only after `submit()` returns is the basket updated with that journal payload. A real process exit during submission can therefore leave broker orders recorded in the journal but a basket still marked `planned`. The current live `reconcile()` skips baskets without an OPEN_EXEC_STATES execution payload. Ensure the existing crash/restart requirement recovers the journal into the basket and reconciles its owned pending/open legs without submitting again. A journal-only restart unit test does not cover this integration window.
+4. **Broker partial fills and actual P&L.** The intermediate reconciler reports a live partially filled order as `pending`; a cancelled/expired remaining order becomes terminal before its partially filled open position is checked. Ensure the pending remainder and open filled volume are both accounted for. For actual broker P&L, the current summation uses only DEAL_ENTRY_OUT records, omitting entry-side commission/fees. Cover all owned position deals/costs and partial closure/expiry of remaining pending volume as required by the approved actual-outcome acceptance.
+5. **Shared MT5 access lock.** Check that executor calls and chart/data-feed reads use one common MT5 access lock. The current executor receives `scanner._feed_lock`, while `MT5Feed` methods use their separate `feed._lock`, and REST chart reads can call the feed independently. The approved task requires use of the already connected session under its feed lock.
+
+6. **Truthful API trading status.** While the UI/API changes are in progress, `/api/state` still returns the legacy hard-coded `trading: disabled ... no orders are ever sent` string (both no-feed and normal responses). Keep the approved truthful-status requirement: for FVG it must reflect the execution capability and its actual armed/blocked state rather than claiming orders are never sent even after FVG is armed. Preserve read-only CRT/FastSweep reporting and do not restart the live backend.
+
+Continue the single already approved task; publish only its matching final report when implementation and actual validation are complete. No real broker orders, Telegram sends, activation or restart.

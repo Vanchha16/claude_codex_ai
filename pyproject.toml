@@ -1,0 +1,10 @@
+[project]
+name = "vc-trade-gold-signals"
+version = "0.1.0"
+description = "Local gold signal workstation: CRT-SMC-v1 alerts, simulated outcomes, dashboard and Telegram test delivery. Never places trades."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q -p no:cacheprovider"

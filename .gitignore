@@ -1,0 +1,24 @@
+# secrets and local runtime state
+.env
+.venv/
+.tmp/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# helper checkout and its local dependencies
+tools/agent-to-agent/node_modules/
+tools/agent-to-agent/.npm-cache/
+
+# dashboard UI build: local dependencies and the pristine upstream TailAdmin checkout (reproducible from the pinned commit)
+frontend/node_modules/
+vendor/tailadmin-free/
+.img
+
+# VC Signal nonsecret dashboard settings (written by the Setup form)
+config/local_settings.json
+
+# separate checkouts and local tool artifacts (not part of this app)
+tools/agent-to-agent/
+.playwright-mcp/
+node_modules/

@@ -1,0 +1,4 @@
+{
+  "_comment": "FVG-Trend-M15-M5-v1 risk PREFERENCE confirmed by the user on 2026-10-07: a fixed 10 USD total planned SL risk per setup, split into equal 10/3 USD shares across the three limit legs before lot-step rounding. This file does NOT arm automatic execution (that needs a separate explicit opt-in bound to source/symbol/account/strategy version) and does not activate FVG. Fees, gaps and slippage can make actual losses larger.",
+  "risk_usd_per_setup": 10.0
+}
