@@ -146,6 +146,8 @@
       el("span", fmtT(b.placed_at), "vc-num text-[13px]"), chip(st.label, st.tone));
     if (b.delivery) head.append(chip(`Telegram ${b.delivery.status}`, b.delivery.status === "sent" ? "success" : b.delivery.status === "failed" ? "error" : "light"));
     box.append(head, el("p", `Zone ${fmtP(b.bottom)} – ${fmtP(b.top)} · SL ${fmtP(b.sl)} · ${b.id}`, "vc-muted vc-num mt-1 text-[12px]"));
+    const stopText = root.VCFvgDisplay ? root.VCFvgDisplay.stopNote(b.stop, fmtP) : null;
+    if (stopText) box.append(el("p", stopText, "vc-muted mt-1 text-[12px]"));
     const ex = b.execution || {};
     const t = el("table", null, "vc-table vc-sig-legs mt-2");
     const hr = el("tr");

@@ -295,12 +295,16 @@ class MT5FvgExecutor:
 
     def submit(self, plan_id: str, gap: Gap, meta: SymbolMeta, now: datetime, expires: datetime, *,
                stop_spread_margin_ticks: int = 1, eligibility: Optional[dict] = None, comment_tag: str = "FVG",
-               allowed_prefixes: tuple = (), engine: Optional[str] = None) -> dict:
+               allowed_prefixes: tuple = (), engine: Optional[str] = None, levels: Optional[tuple] = None,
+               stop: Optional[dict] = None) -> dict:
         """Automatic submission of one basket. Never retried after a journal row exists (idempotent).
         eligibility = {"confirm_close", "setup_expires", "max_age_seconds"}: checked with the current clock before
         preflight, after preflight and immediately before EVERY send; stale context sends nothing new.
         Dual engines: comment_tag "FVG15"/"FVG5"; allowed_prefixes = comment prefixes of the OTHER engine's still-open
-        baskets on this account (their own orders/positions may coexist; anything else on the symbol still blocks)."""
+        baskets on this account (their own orders/positions may coexist; anything else on the symbol still blocks).
+        levels/stop (task 20261009-103608): the engine's ONE fixed (sl, legs) plan and its stop provenance. The plan is
+        re-verified (app.fvg_orders.verified_levels) but never rebuilt from a new quote: if the latest spread or broker
+        distances no longer allow it, the whole basket is refused before any send."""
         if not self.policy.enabled:
             return {"state": "disabled", "reason": "automatic execution is OFF; no orders submitted"}
         if self.policy.risk_usd is None:
@@ -332,7 +336,7 @@ class MT5FvgExecutor:
 
             broker_meta = SymbolMeta(meta.name, info.trade_tick_size, info.point, info.digits, "mt5")  # current precision
             plan = build_order_plan(gap, broker_meta, cash, loss, volume_min=info.volume_min,
-                                    volume_max=info.volume_max, volume_step=info.volume_step)
+                                    volume_max=info.volume_max, volume_step=info.volume_step, levels=levels)
             if not info.order_mode & const(mt5, "SYMBOL_ORDER_LIMIT"):
                 raise ValueError("symbol does not permit limit orders")
             if not info.expiration_mode & const(mt5, "SYMBOL_EXPIRATION_SPECIFIED"):
@@ -373,6 +377,7 @@ class MT5FvgExecutor:
                        "time_base": self.timebase_fn().to_dict(), "risk_usd": self.policy.risk_usd,
                        "cash_risk_account_ccy": cash, "nominal_planned_loss": sum(p.planned_loss for p in plan),
                        "comment_prefix": comment_prefix(plan_id, comment_tag), "engine": engine,
+                       **({"stop": stop} if stop else {}),
                        "legs": [{**asdict(p), "state": "prepared", "ticket": None,
                                  "comment": leg_comment(plan_id, p.number, comment_tag)} for p in plan]}
             if not self.journal.create(plan_id, payload):  # durable reservation before any send

@@ -403,7 +403,7 @@ def dual_next(rec: dict, basket: Optional[dict]) -> str:
 
 
 def dual_record_view(s: FvgSetup, basket: Optional[dict], m5: list[Bar], cfg: FvgConfig, meta: Optional[SymbolMeta],
-                     now: datetime, current_versions) -> dict:
+                     now: datetime, current_versions, stop_policy: Optional[dict] = None) -> dict:
     from .fvg_dual import TF, engine_bars
     rec = record_dict(s, current_versions)
     eng = rec["engine"]
@@ -422,6 +422,7 @@ def dual_record_view(s: FvgSetup, basket: Optional[dict], m5: list[Bar], cfg: Fv
         ex = basket.get("execution") or {}
         planned = ex.get("legs") or []
         levels = {"source": "basket", "sl": basket.get("sl"), "account_currency": ex.get("account_currency"),
+                  "stop": basket.get("stop"),  # stored stop provenance (spread-aware stops), never recomputed
                   "legs": [{**l, "volume": (planned[i] if i < len(planned) else {}).get("volume"),
                             "planned_loss": (planned[i] if i < len(planned) else {}).get("planned_loss"),
                             "state": (planned[i] if i < len(planned) else {}).get("state")}
@@ -433,6 +434,9 @@ def dual_record_view(s: FvgSetup, basket: Optional[dict], m5: list[Bar], cfg: Fv
                   "(feed offline), so exact preview levels cannot be computed"}
     else:
         levels = {"source": "preview", **preview_levels(s.direction, s.bottom, s.top, meta, cfg)}
+        if (stop_policy or {}).get(eng) == "spread_aware":
+            levels["note"] = ("Preview uses the base stop. This engine's spread-aware stop depends on the live spread at "
+                              "the decision, which is not stored for a setup without a basket, so no adjusted stop is shown.")
     notes = []
     if not m5:
         notes.append("candles unavailable (feed offline or history not returned)")

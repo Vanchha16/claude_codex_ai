@@ -75,7 +75,11 @@ class ActiveStrategy:
                               f"that timeframe), gap >= max({cfg.min_gap_ticks} ticks, {cfg.gap_atr:g} ATR{cfg.atr_period}) "
                               f"and a {cfg.displacement_atr:g} ATR middle body. A qualified gap places three limits at "
                               f"{'/'.join(f'{p:g}%' for p in cfg.entry_depths)} depth immediately (no retest/confirmation), "
-                              f"common SL {cfg.sl_buffer_ticks} ticks beyond the zone, each TP 1:{cfg.reward_risk:g}"),
+                              f"common SL {cfg.sl_buffer_ticks} ticks beyond the zone"
+                              + ("".join(f" ({'/'.join(sa)}: moved further outward when needed so every leg is >= spread + "
+                                         f"{cfg.stop_spread_margin_ticks} tick from it)"
+                                         for sa in [[e for e in d.engines if d.stop_policy_for(e) == "spread_aware"]] if sa))
+                              + f", each TP 1:{cfg.reward_risk:g}"),
                     "controls": {"open_baskets_per_engine": d.max_open_baskets_per_engine,
                                  "cooldown_minutes_per_engine": cfg.cooldown_minutes,
                                  "max_baskets_per_bangkok_day_total": cfg.max_baskets_per_day,

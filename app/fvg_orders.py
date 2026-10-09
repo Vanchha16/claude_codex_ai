@@ -14,7 +14,7 @@ from decimal import Decimal, ROUND_FLOOR
 from typing import Callable
 
 from .fastsweep import BUY
-from .fvg import PROFILES, FvgConfig, Gap, basket_levels
+from .fvg import PROFILES, FvgConfig, Gap, base_stop, basket_levels, legs_for_stop
 from .models import SymbolMeta
 
 # Explicitly supported account currencies -> account units per 1 USD. Cent accounts report USC (US cents).
@@ -50,15 +50,22 @@ def floor_to_step(raw: float, step: float) -> float:
 
 def build_order_plan(gap: Gap, meta: SymbolMeta, cash_risk: float, loss_per_lot: Callable[[str, float, float], float], *,
                      volume_min: float, volume_max: float, volume_step: float, sl_buffer_ticks: int = 2,
-                     percentages=(1.0, 50.0, 80.0), cfg: FvgConfig | None = None) -> tuple[PlannedOrder, ...]:
+                     percentages=(1.0, 50.0, 80.0), cfg: FvgConfig | None = None,
+                     levels: tuple | None = None) -> tuple[PlannedOrder, ...]:
     """loss_per_lot(direction, entry, sl) returns a POSITIVE account-currency loss for one lot.
-    cash_risk is the combined nominal loss (account currency) if all legs fill and stop at the common SL."""
+    cash_risk is the combined nominal loss (account currency) if all legs fill and stop at the common SL.
+    levels: the engine's already-chosen (sl, legs) plan (task 20261009-103608). It is never trusted blindly: the
+    entries and 1:2 TPs are recomputed from the gap and that stop at THIS precision and must match exactly, and the
+    stop must be on the tick grid and at or beyond the base stop (outward only). None = the base stop (legacy)."""
     if any(not isinstance(x, (int, float)) or not math.isfinite(x) or x <= 0 for x in (cash_risk, volume_min, volume_max, volume_step)):
         raise ValueError("risk and broker volume limits must be finite and positive")
     if volume_min > volume_max or not isinstance(sl_buffer_ticks, int) or sl_buffer_ticks < 1:
         raise ValueError("invalid volume limits or stop buffer")
     cfg = replace(cfg or PROFILES["rr2"], sl_buffer_ticks=sl_buffer_ticks, entry_depths=tuple(percentages)).validate()
-    sl, legs = basket_levels(gap, meta, cfg)
+    if levels is None:
+        sl, legs = basket_levels(gap, meta, cfg)
+    else:
+        sl, legs = verified_levels(gap, meta, cfg, levels)
     share = cash_risk / len(legs)
     out = []
     for leg in legs:
@@ -74,4 +81,32 @@ def build_order_plan(gap: Gap, meta: SymbolMeta, cash_risk: float, loss_per_lot:
     return tuple(out)
 
 
-__all__ = ["ACCOUNT_UNITS_PER_USD", "account_cash_risk", "PlannedOrder", "build_order_plan", "floor_to_step", "BUY"]
+def verified_levels(gap: Gap, meta: SymbolMeta, cfg: FvgConfig, levels: tuple) -> tuple:
+    """(sl, legs) from the engine, re-derived and checked here; any disagreement refuses the plan (nothing is sent)."""
+    sl, planned = levels
+    if not isinstance(sl, (int, float)) or isinstance(sl, bool) or not math.isfinite(sl) or sl <= 0:
+        raise ValueError("planned stop is invalid")
+    steps = Decimal(repr(float(sl))) / Decimal(repr(float(meta.tick_size)))
+    if abs(steps - steps.to_integral_value()) > Decimal("1e-6"):
+        raise ValueError("planned stop is not on the broker tick grid")
+    base = base_stop(gap, meta, cfg)
+    if (sl > base + 1e-9) if gap.direction == BUY else (sl < base - 1e-9):
+        raise ValueError("planned stop is inside the base stop (a stop may only move outward)")
+    legs = legs_for_stop(gap, meta, cfg, sl)
+    got = [(_get(l, "number", "n"), _get(l, "entry"), _get(l, "tp")) for l in planned]
+    if got != [(l.number, l.entry, l.tp) for l in legs]:
+        raise ValueError("planned entries/targets do not match the levels recomputed at the broker's precision")
+    return sl, legs
+
+
+def _get(leg, *names):
+    for n in names:
+        if isinstance(leg, dict) and n in leg:
+            return leg[n]
+        if hasattr(leg, n):
+            return getattr(leg, n)
+    return None
+
+
+__all__ = ["ACCOUNT_UNITS_PER_USD", "account_cash_risk", "PlannedOrder", "build_order_plan", "verified_levels",
+           "floor_to_step", "BUY"]

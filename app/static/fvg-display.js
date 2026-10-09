@@ -36,5 +36,22 @@
     return { label: "Last closed H1 / M5", value: `H1 ${fmtT(lc.H1)} · M5 ${fmtT(lc.M5)}` };
   }
 
-  return { legRisk, lastClosed, UNITS_PER_USD };
+  /** One line explaining a stored stop's provenance (task 20261009-103608), or null when there is nothing to say.
+   * Only STORED values are shown: a moved stop names its base stop and the measured spread it was moved for. */
+  function stopNote(stop, fmtP) {
+    if (!stop || typeof stop !== "object") return null;
+    const p = fmtP || ((v) => String(v));
+    const n = stop.moved_ticks;
+    if (isNum(n) && n > 0 && isNum(stop.base_sl) && isNum(stop.spread)) {
+      return `Spread-aware stop: moved ${n} tick${n === 1 ? "" : "s"} outward from ${p(stop.base_sl)} so every leg is at `
+        + `least the spread (${stop.spread.toFixed(2)}) + 1 tick from the SL; targets recalculated at 1:2.`;
+    }
+    if (typeof stop.note === "string" && stop.note) return `Stop: ${stop.note}.`;
+    if (stop.policy === "spread_aware" && isNum(stop.spread)) {
+      return `Spread-aware stop: no move needed at spread ${stop.spread.toFixed(2)}.`;
+    }
+    return null;
+  }
+
+  return { legRisk, lastClosed, stopNote, UNITS_PER_USD };
 });

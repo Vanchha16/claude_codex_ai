@@ -12,6 +12,11 @@ Rules (user-approved 2026-10-08; engineering starting values, not claimed profit
    C is recorded once (accepted or rejected with a reason) and never re-decided.
 4-5. Three limits at 1/50/80 % depth of the ORIGINATING zone, common SL 2 ticks beyond the far edge, each leg 1:2
    (app.fvg.basket_levels). Risk = the configured USD budget PER BASKET (10 USD), split in thirds before lot flooring.
+   Stop policy per engine (user-approved: M5 in task 20261009-103608, M15 in task 20261009-110034): BOTH engines
+   use a SPREAD-AWARE common stop: that base stop, moved outward by the fewest whole ticks so every leg is >= the
+   measured spread + 1 tick from it (app.fvg.spread_aware_levels; entries unchanged, TPs recomputed at 1:2, lots
+   shrink with the wider stop). It needs a valid fresh quote with spread <= the 0.50 maximum; otherwise nothing is
+   adjusted. The fixed policy stays available per engine (stop_policy) for comparison/rollback; legacy v1 is fixed.
 6. One open/unresolved basket PER ENGINE (pending, sending, unknown, partial and filled exposure all occupy it).
 7. 30-minute cooldown PER ENGINE; at most 4 accepted baskets per Bangkok date in TOTAL across both engines. At one
    decision timestamp M15 is decided before M5 (deterministic allocation of a last daily slot).
@@ -30,8 +35,8 @@ from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from .fastsweep import BUY, M15, bangkok_date, ema_last
-from .fvg import (FvgConfig, Gap, atr_last, basket_levels, contiguous_run, detect_gap, new_setup, placement_violation,
-                  qualify, stop_within_spread)
+from .fvg import (STOP_FIXED, STOP_POLICIES, STOP_SPREAD_AWARE, FvgConfig, Gap, atr_last, contiguous_run, detect_gap,
+                  fixed_levels, new_setup, placement_violation, qualify, spread_aware_levels, stop_within_spread)
 from .fvg_execution import comment_prefix, plan_id_for
 from .fvg_live import EXEC_STATUS, FvgLiveEngine, basket_is_open
 from .models import M5, Bar, SymbolMeta, aggregate, iso, parse_iso
@@ -54,6 +59,12 @@ class DualFvgConfig:
     daily_cap_scope: str = "total"         # rules.max_baskets_per_day counts both engines together
     risk_scope: str = "per_basket"         # the configured USD budget is per basket (2 engines -> 2x concurrent)
     entry_trigger: str = "qualified_fvg"   # no retest / confirmation stage
+    # per-engine common-stop policy (part of the digest, so the engine versions record it); STOP_FIXED is the
+    # rollback/comparison value
+    stop_policy: tuple = (("M15", STOP_SPREAD_AWARE), ("M5", STOP_SPREAD_AWARE))
+
+    def stop_policy_for(self, engine: str) -> str:
+        return dict(self.stop_policy)[engine]
 
     def validate(self) -> "DualFvgConfig":
         self.rules.validate()
@@ -62,6 +73,9 @@ class DualFvgConfig:
         if (self.max_open_baskets_per_engine, self.cooldown_scope, self.daily_cap_scope, self.risk_scope,
                 self.entry_trigger) != (1, "per_engine", "total", "per_basket", "qualified_fvg"):
             raise ValueError("unsupported dual-mode scope settings")
+        policy = dict(self.stop_policy)
+        if set(policy) != set(ENGINES) or any(v not in STOP_POLICIES for v in policy.values()):
+            raise ValueError("stop_policy needs one known policy per engine")
         return self
 
     @property
@@ -82,6 +96,11 @@ class DualFvgConfig:
                 "daily_cap": f"{r.max_baskets_per_day} accepted baskets per Bangkok date in total (both engines)",
                 "risk": "configured USD budget per basket; up to 2 baskets (one per engine) at once",
                 "tie_order": "M15 before M5 at the same decision time", "pending_expiry_minutes": r.pending_expiry_minutes,
+                "stop_policy": {e: (f"spread-aware: {r.sl_buffer_ticks} ticks beyond the far edge, moved further "
+                                    f"outward by whole ticks when needed so every leg is >= spread + "
+                                    f"{r.stop_spread_margin_ticks} tick from it")
+                                if self.stop_policy_for(e) == STOP_SPREAD_AWARE else
+                                f"fixed: {r.sl_buffer_ticks} ticks beyond the far edge" for e in ENGINES},
                 "decision_max_age_seconds": r.max_confirmation_age_seconds}
 
 
@@ -280,13 +299,32 @@ class DualFvgLiveEngine(FvgLiveEngine):
             return self._reject(s, "c_close_in_future", now)
         if age > cfg.max_confirmation_age_seconds:
             return self._reject(s, f"decision_too_old ({age:.0f}s > {cfg.max_confirmation_age_seconds}s)", now)
+        zone = Gap(s.direction, s.bottom, s.top, None, None)
         try:
-            sl, legs = basket_levels(Gap(s.direction, s.bottom, s.top, None, None), self.meta, cfg)
+            plan = fixed_levels(zone, self.meta, cfg)
         except ValueError as exc:
             return self._reject(s, f"levels_invalid: {exc}", now)
+        policy = self.dcfg.stop_policy_for(engine)
+        stop = plan.provenance() | {"policy": policy}
+        if policy == STOP_SPREAD_AWARE and entry_fn is None:
+            stop["note"] = "no live quote source: base stop kept, no spread adjustment"
         if entry_fn is not None:
             if quote is None:
                 return self._reject(s, "no_quote_for_eligibility_check", now)
+            if policy == STOP_SPREAD_AWARE:
+                problem = quote_problem(quote, now, cfg.quote_max_age_seconds)
+                if problem:  # never adjust from an invented, invalid or stale spread
+                    return self._reject(s, f"no_quote_for_eligibility_check: {problem}", now)
+                spread = quote.ask - quote.bid
+                if spread <= cfg.max_spread_price + 1e-9:
+                    try:
+                        plan = spread_aware_levels(zone, self.meta, cfg, spread)
+                    except ValueError as exc:
+                        return self._reject(s, f"levels_invalid: {exc}", now)
+                    stop = plan.provenance() | {"quote_time": iso(quote.time), "bid": quote.bid, "ask": quote.ask}
+                else:
+                    stop["note"] = f"spread {spread:.2f} above the {cfg.max_spread_price:.2f} maximum: not adjusted"
+            sl, legs = plan.sl, plan.legs
             entries = [(l.number, l.entry) for l in legs]
             why = stop_within_spread(sl, entries, quote.ask - quote.bid, cfg, self.meta.tick_size)
             if why:
@@ -294,6 +332,7 @@ class DualFvgLiveEngine(FvgLiveEngine):
             why = placement_violation(s.direction, entries, quote.bid, quote.ask, self.meta.tick_size)
             if why:
                 return self._reject(s, f"limit_on_wrong_side_of_market: {why}", now)
+        sl, legs = plan.sl, plan.legs
         risk = self.risk_fn()
         current = self.account_fn()
         pid = plan_id_for(s.key)
@@ -313,14 +352,15 @@ class DualFvgLiveEngine(FvgLiveEngine):
                       "legs": [{"n": l.number, "pct": l.percent, "entry": l.entry, "tp": l.tp, "sl": sl,
                                 "rr": round(abs(l.tp - l.entry) / abs(l.entry - sl), 2)} for l in legs],
                       "execution": None, "meta": {"digits": self.meta.digits, "tick_size": self.meta.tick_size},
-                      "account_id": current}
+                      "account_id": current, "stop": stop}
             if not self.fstore.add_basket(basket):
                 return self._reject(s, "duplicate_basket", now)
         s.status = "accepted"
         s.meta["basket"] = basket["id"]
         self.fstore.update_setup(s)
         self._event("signal", f"{basket['id']}: {engine} {s.direction} 3 limits {[l['entry'] for l in basket['legs']]} "
-                              f"SL {sl}", now)
+                              f"SL {sl}" + (f" (moved {stop['moved_ticks']} tick(s) outward from {stop['base_sl']} for "
+                                            f"spread {stop['spread']:.2f})" if stop.get("moved_ticks") else ""), now)
         try:
             self.alert_fn(basket)  # Telegram opt-in + outbox (dedup by basket id); never the submission trigger
         except Exception as exc:
@@ -336,7 +376,8 @@ class DualFvgLiveEngine(FvgLiveEngine):
                 result = executor.submit(pid, gap, self.meta, now, expires, stop_spread_margin_ticks=cfg.stop_spread_margin_ticks,
                                          eligibility={"confirm_close": s.c_close, "setup_expires": expires,
                                                       "max_age_seconds": cfg.max_confirmation_age_seconds},
-                                         comment_tag=TAG[engine], allowed_prefixes=others, engine=engine)
+                                         comment_tag=TAG[engine], allowed_prefixes=others, engine=engine,
+                                         levels=(sl, legs), stop=stop)
             except Exception as exc:
                 result = self._classify_submit_error(executor, pid, exc)
             basket["execution"] = result
@@ -472,8 +513,11 @@ def replay_dual(m5: list[Bar], meta: SymbolMeta, dcfg: DualFvgConfig, costs, *, 
             occ = [Occupancy(engine_of_basket[b.id], b.placed_at, b.open(), risk_usd) for b in baskets]
             why = admission(e, t, occ, dcfg, risk_usd)
             if why is None:
-                try:
-                    sl, legs = basket_levels(gap, meta, r)
+                try:  # replay has no contemporaneous quotes: the spread-aware stop uses the ASSUMED costs.spread
+                    plan = (spread_aware_levels(gap, meta, r, costs.spread)
+                            if dcfg.stop_policy_for(e) == STOP_SPREAD_AWARE and costs.spread <= r.max_spread_price + 1e-9
+                            else fixed_levels(gap, meta, r))
+                    sl, legs = plan.sl, plan.legs
                 except ValueError as exc:
                     why = f"levels_invalid: {exc}"
             if why is None:
@@ -500,10 +544,27 @@ def replay_dual(m5: list[Bar], meta: SymbolMeta, dcfg: DualFvgConfig, costs, *, 
             elif leg.state == "filled" and leg.outcome is None:
                 leg.outcome, leg.note = "unresolved", "history ended with the position open"
     return {"strategy": dcfg.version, "simulation": True, "symbol": meta.name, "costs": asdict(costs), "funnel": funnel,
+            "stop_policy": dict(dcfg.stop_policy),
+            "spread_note": (f"no contemporaneous quotes: spread checks and the spread-aware stop use the assumed "
+                            f"spread {costs.spread} for every decision (not historical spread validation)"),
             "setups": setups,
             "segments": {e: _segment([b for b in baskets if engine_of_basket[b.id] == e]) for e in ENGINES}
             | {"all": _segment(baskets)},
             "baskets": [_basket_row(b) | {"engine": engine_of_basket[b.id]} for b in baskets]}
+
+
+def quote_problem(quote, now: datetime, max_age_seconds: int) -> Optional[str]:
+    """Why a quote cannot supply the spread for a stop adjustment (None = usable). Never substitutes a value."""
+    try:
+        valid = quote.is_valid()
+        age = (now - quote.time).total_seconds()
+    except Exception:
+        return "quote unreadable"
+    if not valid:
+        return "quote invalid"
+    if not -5 <= age <= max_age_seconds:
+        return f"quote is {age:.0f}s old (> {max_age_seconds}s)"
+    return None
 
 
 __all__ = ["DUAL_STRATEGY", "ENGINES", "DualFvgConfig", "DUAL_PROFILE", "DualFvgLiveEngine", "Occupancy", "admission",

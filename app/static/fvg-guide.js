@@ -74,7 +74,7 @@
     return { mode: "none", key: requestedKey || null };
   }
 
-  if (!root || !root.document) return { stepLook, clampFrame, layoutChart, spreadLabels, selectionState };
+  if (!root || !root.document) return { stepLook, clampFrame, layoutChart, spreadLabels, selectionState, stopRule };
 
   // ------------------------------------------------------------------ browser
   const doc = root.document;
@@ -121,6 +121,9 @@
     if (!levels || levels.error) { box.append(el("p", levels && levels.error ? `Levels unavailable: ${levels.error}` : "No levels.", "vc-muted")); return; }
     const source = levels.source === "basket" ? "Actual basket levels" : "PREVIEW levels (not orders)";
     box.append(el("p", `${source} · common SL ${fmtP(levels.sl)} · each leg its own 1:2 target`, "vc-label mb-2"));
+    const stopText = levels.source === "basket" && root.VCFvgDisplay ? root.VCFvgDisplay.stopNote(levels.stop, fmtP) : null;
+    if (stopText) box.append(el("p", stopText, "vc-muted mb-2 text-[13px]"));
+    if (levels.note) box.append(el("p", levels.note, "vc-muted mb-2 text-[13px]"));
     const table = el("table", null, "vc-table");
     const head = el("tr");
     for (const h of ["Leg", "Depth", "Entry (limit)", "Stop loss", "Take profit", "RR", "Lots", "Planned loss", "State"]) head.append(el("th", h));
@@ -305,6 +308,14 @@
   }
 
   // ------------------------------------------------------------------ rule reference
+  /** The dual engines' common-stop rule from the server's own per-engine scope text (task 20261009-110034). */
+  function stopRule(cfg, scopes) {
+    const sp = (scopes && scopes.stop_policy) || {};
+    if (sp.M15 && sp.M15 === sp.M5) return `common stop for both engines: ${sp.M15}`;
+    if (sp.M15 || sp.M5) return `common stop: M15 ${sp.M15 || "?"}; M5 ${sp.M5 || "?"}`;
+    return `common stop ${cfg.sl_buffer_ticks} ticks beyond the far edge`;
+  }
+
   function renderRules(cfg, scopes, mode) {
     const box = $("g-rules-body");
     if (!cfg || !box) return;
@@ -313,7 +324,7 @@
       ["Two engines (dual mode)", "An M15 engine and an M5 engine run side by side. Each uses only its OWN closed candles (M15: complete M15 candles; M5: closed M5 candles) for the gap, the trend warm-up and ATR. Neither needs the other's direction, readiness or approval."],
       ["Gap and qualification", `Three adjacent CLOSED candles A, B, C of that engine's timeframe; BUY gap A.high..C.low, SELL gap C.high..A.low. EMA${cfg.ema_fast}/EMA${cfg.ema_slow} trend on at least ${cfg.trend_min_candles} contiguous candles of that timeframe, gap at least max(${cfg.min_gap_ticks} ticks, ${cfg.gap_atr} × ATR${cfg.atr_period}), candle B's body at least ${cfg.displacement_atr} × ATR.`],
       ["Entry event", `Qualification IS the entry decision: no retest and no confirmation. Candle C must close after the current session started and be at most ${scopes.decision_max_age_seconds} s old when the order is decided and sent; old gaps from catch-up or reconnects are recorded, never ordered.`],
-      ["Orders", `Three limits at ${cfg.entry_depths.join("% / ")}% depth of that engine's zone, common stop ${cfg.sl_buffer_ticks} ticks beyond the far edge, each 1:${cfg.reward_risk}. They wait for price to come back; a limit is not a market fill.`],
+      ["Orders", `Three limits at ${cfg.entry_depths.join("% / ")}% depth of that engine's zone, ${stopRule(cfg, scopes)}, each 1:${cfg.reward_risk}. They wait for price to come back; a limit is not a market fill.`],
       ["Capacity", `${scopes.open_baskets} open basket; cooldown ${scopes.cooldown}; ${scopes.daily_cap}; ${scopes.risk}; ${scopes.tie_order}.`],
       ["Invalidation", "A later CLOSED candle of the basket's own timeframe beyond the far edge removes that basket's pending remainder (M15 baskets: M15 closes only; M5 baskets: M5 closes). Filled positions keep their stop and target."],
     ] : [];

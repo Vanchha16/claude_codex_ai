@@ -280,27 +280,105 @@ class LegLevels:
     tp: float
 
 
-def basket_levels(gap: Gap, meta: SymbolMeta, cfg: FvgConfig) -> tuple[float, tuple[LegLevels, ...]]:
-    """Common SL (2 ticks beyond the far edge, outward) and each leg's own 1:2 TP (outward). Raises if invalid."""
-    buy = gap.direction == BUY
-    D = lambda x: Decimal(repr(float(x)))  # exact decimals: float noise must not move a level by a tick
-    buffer = cfg.sl_buffer_ticks * D(meta.tick_size)
-    sl = (round_down_to_tick(float(D(gap.bottom) - buffer), meta.tick_size, meta.digits) if buy else
-          round_up_to_tick(float(D(gap.top) + buffer), meta.tick_size, meta.digits))
+def _D(x) -> Decimal:
+    return Decimal(repr(float(x)))  # exact decimals: float noise must not move a level by a tick
+
+
+def base_stop(gap: Gap, meta: SymbolMeta, cfg: FvgConfig) -> float:
+    """The common SL `sl_buffer_ticks` beyond the far edge, rounded outward (BUY down, SELL up)."""
+    buffer = cfg.sl_buffer_ticks * _D(meta.tick_size)
+    sl = (round_down_to_tick(float(_D(gap.bottom) - buffer), meta.tick_size, meta.digits) if gap.direction == BUY else
+          round_up_to_tick(float(_D(gap.top) + buffer), meta.tick_size, meta.digits))
     if sl <= 0:
         raise ValueError("shared stop must be positive")
+    return sl
+
+
+def legs_for_stop(gap: Gap, meta: SymbolMeta, cfg: FvgConfig, sl: float) -> tuple[LegLevels, ...]:
+    """The three entries (unchanged ladder) and each leg's own 1:2 TP (outward) measured from the common stop `sl`."""
+    buy = gap.direction == BUY
+    D = _D
     legs = []
     for lv in entry_ladder(gap, meta, tuple(cfg.entry_depths)):
         d = abs(D(lv.price) - D(sl))
-        if d <= 0:
-            raise ValueError("entry equals stop")
+        if d <= 0 or (D(sl) >= D(lv.price) if buy else D(sl) <= D(lv.price)):
+            raise ValueError("the stop must lie beyond every entry")
         reward = D(cfg.reward_risk) * d
         tp = (round_up_to_tick(float(D(lv.price) + reward), meta.tick_size, meta.digits) if buy else
               round_down_to_tick(float(D(lv.price) - reward), meta.tick_size, meta.digits))
         if tp <= 0:
             raise ValueError("target must be positive")
         legs.append(LegLevels(lv.number, lv.percent, lv.price, tp))
-    return sl, tuple(legs)
+    return tuple(legs)
+
+
+def basket_levels(gap: Gap, meta: SymbolMeta, cfg: FvgConfig) -> tuple[float, tuple[LegLevels, ...]]:
+    """Common SL (2 ticks beyond the far edge, outward) and each leg's own 1:2 TP (outward). Raises if invalid."""
+    sl = base_stop(gap, meta, cfg)
+    return sl, legs_for_stop(gap, meta, cfg, sl)
+
+
+STOP_FIXED = "fixed"                # common SL = base stop (sl_buffer_ticks beyond the far edge)
+STOP_SPREAD_AWARE = "spread_aware"  # base stop, moved outward by the fewest whole ticks the spread-room rule needs
+STOP_POLICIES = (STOP_FIXED, STOP_SPREAD_AWARE)
+
+
+def spread_ticks(spread: float, tick: float) -> int:
+    """A measured spread in whole ticks, rounded UP (a fractional/float-noisy spread never shrinks the room)."""
+    if not isinstance(spread, (int, float)) or isinstance(spread, bool) or not math.isfinite(spread) or spread < 0:
+        raise ValueError("spread must be finite and non-negative")
+    if not isinstance(tick, (int, float)) or not math.isfinite(tick) or tick <= 0:
+        raise ValueError("tick size must be finite and positive")
+    return int(math.ceil(_D(spread) / _D(tick) - Decimal("1e-6")))
+
+
+def spread_aware_stop(direction: str, base_sl: float, entries, spread: float, margin_ticks: int, tick: float,
+                      digits: int) -> float:
+    """Task 20261009-103608: the common stop is the base stop, or further outward by the minimum whole ticks so that
+    EVERY entry is at least spread + margin ticks from it (rule 6a). BUY: SL <= base and <= every entry - room, rounded
+    down; SELL: SL >= base and >= every entry + room, rounded up. Entries never move."""
+    if isinstance(margin_ticks, bool) or not isinstance(margin_ticks, int) or margin_ticks < 0:
+        raise ValueError("margin ticks must be a non-negative integer")
+    prices = [p for _, p in entries]
+    if not prices:
+        raise ValueError("no entries")
+    room = (spread_ticks(spread, tick) + margin_ticks) * _D(tick)
+    if direction == BUY:
+        sl = round_down_to_tick(float(min(_D(base_sl), min(_D(p) for p in prices) - room)), tick, digits)
+    else:
+        sl = round_up_to_tick(float(max(_D(base_sl), max(_D(p) for p in prices) + room)), tick, digits)
+    if sl <= 0:
+        raise ValueError("shared stop must be positive")
+    return sl
+
+
+@dataclass(frozen=True)
+class StopPlan:
+    """One immutable level plan: the chosen common stop, its provenance and the legs (entries + 1:2 TPs) for it."""
+    sl: float
+    base_sl: float
+    legs: tuple
+    policy: str
+    spread: Optional[float]       # the measured spread the adjustment used (None: fixed policy / no adjustment)
+    moved_ticks: int              # how far the stop moved outward from the base stop
+
+    def provenance(self) -> dict:
+        return {"policy": self.policy, "base_sl": self.base_sl, "sl": self.sl, "spread": self.spread,
+                "moved_ticks": self.moved_ticks}
+
+
+def spread_aware_levels(gap: Gap, meta: SymbolMeta, cfg: FvgConfig, spread: float) -> StopPlan:
+    """Entries unchanged; the common stop moved outward only as far as the spread-room rule needs; TPs recomputed."""
+    base = base_stop(gap, meta, cfg)
+    entries = [(lv.number, lv.price) for lv in entry_ladder(gap, meta, tuple(cfg.entry_depths))]
+    sl = spread_aware_stop(gap.direction, base, entries, spread, cfg.stop_spread_margin_ticks, meta.tick_size, meta.digits)
+    moved = int(round(abs(float((_D(sl) - _D(base)) / _D(meta.tick_size)))))
+    return StopPlan(sl, base, legs_for_stop(gap, meta, cfg, sl), STOP_SPREAD_AWARE, spread, moved)
+
+
+def fixed_levels(gap: Gap, meta: SymbolMeta, cfg: FvgConfig) -> StopPlan:
+    sl, legs = basket_levels(gap, meta, cfg)
+    return StopPlan(sl, sl, legs, STOP_FIXED, None, 0)
 
 
 def stop_within_spread(sl: float, entries, spread: float, cfg: FvgConfig, tick: float) -> Optional[str]:
@@ -336,4 +414,6 @@ def m15_ready(m5_close: datetime) -> bool:
 
 __all__ = ["STRATEGY", "FvgConfig", "PROFILES", "is_fvg_version", "Gap", "detect_gap", "contiguous_run", "atr_last",
            "qualify", "FvgSetup", "new_setup", "advance_setup", "EntryLevel", "entry_ladder", "LegLevels",
-           "basket_levels", "stop_within_spread", "placement_violation", "M5"]
+           "basket_levels", "base_stop", "legs_for_stop", "STOP_FIXED", "STOP_SPREAD_AWARE", "STOP_POLICIES",
+           "spread_ticks", "spread_aware_stop", "StopPlan", "spread_aware_levels", "fixed_levels",
+           "stop_within_spread", "placement_violation", "M5"]

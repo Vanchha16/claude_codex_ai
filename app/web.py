@@ -856,7 +856,8 @@ def create_app(settings: Optional[Settings] = None, *, state_dir: Path = STATE_D
                         m5 = sc.feed.bars_range("M5", start, end)
                 except Exception:
                     m5 = []
-        out["selected"] = (guide.dual_record_view(chosen, basket, m5, cfg, meta, now, current) if is_dual else
+        out["selected"] = (guide.dual_record_view(chosen, basket, m5, cfg, meta, now, current,
+                                                  dict(dual.stop_policy) if dual else None) if is_dual else
                            guide.record_view(chosen, basket, m5, cfg, meta, now))
         return out
 
