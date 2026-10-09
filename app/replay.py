@@ -5,8 +5,7 @@ executable observation after the confirmation close (next M5 open with assumed s
 OHLC data, or the first Bid/Ask tick at/after the close when tick data is supplied). Results are
 SIMULATED price hits, not broker fills, and say nothing about future profitability.
 
-CLI:  python -m app.replay --source demo
-      python -m app.replay --source csv --m5 path/to/m5.csv [--ticks path/to/ticks.csv]
+CLI:  python -m app.replay --source csv --m5 path/to/m5.csv [--ticks path/to/ticks.csv]
       python -m app.replay --source mt5 --symbol <EXACT_SYMBOL> --days 60 [--use-ticks]
 """
 from __future__ import annotations
@@ -220,16 +219,7 @@ def _sig_row(s: Signal, split: datetime) -> dict:
             "outcome_r": s.outcome_r, "outcome_time": iso(s.outcome_time), "note": s.outcome_note}
 
 
-# ------------------------------------------------------------------ data loading
-def load_fixture(path: Path) -> tuple[list[Bar], SymbolMeta, dict]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    m = raw["meta"]
-    meta = SymbolMeta(m["symbol"], m["tick_size"], m["point"], m["digits"], "demo")
-    from .models import M5
-    bars = [Bar(parse_iso(r[0]), M5, r[1], r[2], r[3], r[4]) for r in raw["m5"]]
-    return bars, meta, raw
-
-
+# ------------------------------------------------------------------ data loading (user-supplied history only)
 def load_csv_bars(path: Path) -> list[Bar]:
     """CSV columns: time (ISO-8601 UTC bar OPEN time), open, high, low, close."""
     from .models import M5
@@ -274,7 +264,8 @@ def replay_from_feed(feed, cfg: StrategyConfig, *, days: int, use_ticks: bool, s
 def main(argv: Optional[list[str]] = None, *, feed_factory=None) -> int:
     """`feed_factory` lets tests inject a mock MT5 feed; by default the real read-only MT5Feed is used."""
     ap = argparse.ArgumentParser(description="Replay CRT-SMC-v1 on history (simulated outcomes only).")
-    ap.add_argument("--source", choices=["demo", "csv", "mt5"], default="demo")
+    ap.add_argument("--source", choices=["csv", "mt5"], default="mt5",
+                    help="mt5 = history from your MT5 terminal; csv = your own exported bars (no fictional source)")
     ap.add_argument("--m5", type=Path, help="CSV of M5 bars (csv source)")
     ap.add_argument("--ticks", type=Path, help="optional CSV of Bid/Ask ticks (csv source)")
     ap.add_argument("--symbol", help="exact MT5 symbol (mt5 source)")
@@ -293,11 +284,7 @@ def main(argv: Optional[list[str]] = None, *, feed_factory=None) -> int:
     slippage = settings.replay_slippage_price if args.slippage is None else args.slippage
     holdout = settings.holdout_fraction if args.holdout is None else args.holdout
     ticks_fn, h1 = None, None
-    if args.source == "demo":
-        from .config import DEMO_FIXTURE
-        m5, meta, raw = load_fixture(DEMO_FIXTURE)
-        label = "FICTIONAL demo fixture (not market data)"
-    elif args.source == "csv":
+    if args.source == "csv":
         if not args.m5:
             ap.error("--m5 is required for csv source")
         m5 = load_csv_bars(args.m5)

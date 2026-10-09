@@ -130,7 +130,7 @@ def run_scan(tmp_path, actual, configured):
     feed = MT5Feed("XAUUSD", module=fake, time_config_path=cfg(tmp_path, {SERVER: configured}))
     store = SqliteStore(tmp_path / f"s{actual}{configured}.sqlite")
     settings = Settings(data_mode="mt5", symbol="XAUUSD")
-    sc = Scanner(settings, StrategyConfig(), feed, store, Delivery(store, settings))
+    sc = Scanner(settings, StrategyConfig(), feed, store, Delivery(store, settings, source="test"))
     sc.scan_once()
     return sc
 
@@ -205,7 +205,7 @@ def test_same_server_account_change_is_a_disconnect_and_opens_a_new_session(tmp_
     feed = MT5Feed("XAUUSD", module=fake, time_config_path=cfg(tmp_path, {SERVER: 3}))
     store = SqliteStore(tmp_path / "acct.sqlite")
     settings = Settings(data_mode="mt5", symbol="XAUUSD")
-    sc = Scanner(settings, StrategyConfig(), feed, store, Delivery(store, settings))
+    sc = Scanner(settings, StrategyConfig(), feed, store, Delivery(store, settings, source="test"))
     sc.scan_once()
     first = sc.session_watermark
     assert first is not None

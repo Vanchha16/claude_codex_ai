@@ -1,7 +1,8 @@
-"""FICTIONAL demo feed: replays the deterministic fixture on a simulated clock.
+"""TEST-ONLY fake market feed: replays the deterministic FICTIONAL fixture on a clock the TEST advances.
 
-Nothing here is market data. Quotes are synthesised inside the currently forming M5 bar
-(open -> low/high -> close path) with a fixed demo spread, and timestamped at the simulated time.
+Never imported by the app (VC Signal is MT5-only). It stands in for MT5 so tests never touch a real terminal.
+Quotes are synthesised inside the currently forming M5 bar (open -> low/high -> close path) with a fixed spread,
+timestamped at the simulated time. Tests advance the clock (`advance`) and drive `Scanner.scan_once` themselves.
 """
 from __future__ import annotations
 
@@ -11,17 +12,28 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from ..market import ChartBar, ChartUnavailable, aggregate_closed, epoch, from_bar, normalize
-from ..models import H1, M5, Bar, Quote, SymbolMeta, aggregate, parse_iso
-from .base import FeedStatus
+import json
+
+from app.data.base import FeedStatus
+from app.market import ChartBar, ChartUnavailable, aggregate_closed, epoch, from_bar, normalize
+from app.models import H1, M5, Bar, Quote, SymbolMeta, aggregate, parse_iso
+
+FIXTURE = Path(__file__).resolve().parent / "data" / "xauusd_fixture_m5.json"
 
 
-class DemoFeed:
-    mode = "demo"
+def load_fixture(path: Path = FIXTURE) -> tuple[list[Bar], SymbolMeta, dict]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    m = raw["meta"]
+    meta = SymbolMeta(m["symbol"], m["tick_size"], m["point"], m["digits"], "test")
+    return [Bar(parse_iso(r[0]), M5, r[1], r[2], r[3], r[4]) for r in raw["m5"]], meta, raw
+
+
+class FixtureFeed:
+    """Presents itself like the MT5 feed (mode "mt5"), but has no MT5 module (`_api`), so nothing can trade."""
+    mode = "mt5"
     supports_ticks = False
 
-    def __init__(self, fixture: Path):
-        from ..replay import load_fixture
+    def __init__(self, fixture: Path = FIXTURE):
         self.m5, self._meta, raw = load_fixture(fixture)
         self.h1 = aggregate(self.m5)
         self.spread = float(raw["meta"].get("demo_spread", 0.20))
@@ -55,10 +67,9 @@ class DemoFeed:
 
     def status(self) -> FeedStatus:
         if self.finished:
-            return FeedStatus(False, "demo_finished", "Demo fixture finished. Restart the demo to replay it.",
-                              {"sim_time": self.now().isoformat()})
-        return FeedStatus(True, "demo", "DEMO data: fictional fixture on a simulated clock (not market data)",
-                          {"sim_time": self.now().isoformat(), "fixture_end": self.end.isoformat()})
+            return FeedStatus(False, "disconnected", "test fixture finished", {"sim_time": self.now().isoformat()})
+        return FeedStatus(True, "connected", "TEST fixture feed (fictional, tests only)",
+                          {"sim_time": self.now().isoformat(), "provider": "test fixture"})
 
     def meta(self) -> SymbolMeta:
         return self._meta
@@ -103,7 +114,7 @@ class DemoFeed:
         """Fixture bars for the chart. Only M5 and timeframes derivable from COMPLETE M5 periods exist;
         M1 is unavailable (the fixture has no M1 prices) and is never invented."""
         if tf == "M1":
-            raise ChartUnavailable("M1 is not available in the fictional demo fixture (it only contains M5 bars)")
+            raise ChartUnavailable("M1 is not available in the test fixture (it only contains M5 bars)")
         now = self.now()
         bars = aggregate_closed(self.m5, tf, now)
         if before is not None:
@@ -119,6 +130,28 @@ class DemoFeed:
                 seen = path[: min(int(f * 3), 2) + 1] + [q.bid]  # only prices up to the simulated "now"
                 forming = ChartBar(epoch(bar.open_time), bar.open, max(seen), min(seen), q.bid, None, forming=True)
         return closed, forming
+
+    def shutdown(self) -> None:
+        pass
+
+
+class OfflineFeed:
+    """TEST-ONLY default for every test (see conftest.py): an MT5-shaped feed that is never connected."""
+    mode = "mt5"
+    supports_ticks = False
+
+    def __init__(self, *a, **k):
+        pass
+
+    def connect(self) -> FeedStatus:
+        return self.status()
+
+    def status(self) -> FeedStatus:
+        return FeedStatus(False, "disconnected", "MetaTrader 5 is not running (test offline feed)", {})
+
+    def now(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc)
 
     def shutdown(self) -> None:
         pass

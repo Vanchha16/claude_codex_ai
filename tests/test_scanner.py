@@ -4,8 +4,8 @@ from pathlib import Path
 
 import httpx
 
-from app.config import DEMO_FIXTURE, Settings, StrategyConfig
-from app.data.demo import DemoFeed
+from app.config import Settings, StrategyConfig
+from tests.fixture_feed import FixtureFeed
 from app.delivery import Delivery, TelegramClient
 from app.models import parse_iso
 from app.scanner import Scanner
@@ -15,7 +15,7 @@ CFG = StrategyConfig()
 
 
 def make(tmp_path, start_offset=None, telegram=False, calls=None):
-    feed = DemoFeed(DEMO_FIXTURE)
+    feed = FixtureFeed()
     if start_offset is not None:
         feed._now = feed.start + start_offset
     store = SqliteStore(tmp_path / "demo.sqlite")
@@ -25,7 +25,7 @@ def make(tmp_path, start_offset=None, telegram=False, calls=None):
     def handler(request):
         calls.append(request)
         return httpx.Response(200, json={"ok": True, "result": {"message_id": len(calls)}})
-    delivery = Delivery(store, settings, client_factory=lambda t: TelegramClient(t, transport=httpx.MockTransport(handler)),
+    delivery = Delivery(store, settings, source="test", client_factory=lambda t: TelegramClient(t, transport=httpx.MockTransport(handler)),
                         clock=feed.now)
     return Scanner(settings, CFG, feed, store, delivery), feed, store, delivery, calls
 
@@ -43,7 +43,7 @@ def test_first_signal_live_and_delivered_once(tmp_path):
     delivery.set_enabled(True)
     run(sc, feed, 60, delivery)
     sigs = store.list_signals()
-    assert len(sigs) == 1 and sigs[0].direction == "BUY" and sigs[0].mode == "demo"
+    assert len(sigs) == 1 and sigs[0].direction == "BUY" and sigs[0].mode == "mt5"
     assert sigs[0].entry == sigs[0].ask  # BUY at Ask from the fresh quote
     assert (sigs[0].quote_time - sigs[0].confirm_close).total_seconds() <= CFG.signal_max_age_seconds
     assert [r["status"] for r in store.outbox_rows()] == ["sent"] and len(calls) == 1
@@ -93,7 +93,7 @@ def test_pause_stops_new_alerts_but_tracks_outcomes(tmp_path):
 def test_overlapping_signals_prevented(tmp_path):
     from app.engine import Engine
     from app.models import M5
-    from app.scenarios import buy_setup
+    from tests.scenarios import buy_setup
     from app.store import MemoryStore
     from tests.helpers import META, T0, drive
     store = MemoryStore()
@@ -130,7 +130,7 @@ def test_read_only_strategies_never_import_the_executor():
     import re
     imports = re.compile(r"^\s*(from\s+\S*fvg_execution\s+import|import\s+\S*fvg_execution)", re.M)
     for name in ("engine.py", "strategy.py", "fastsweep.py", "fastsweep_live.py", "fastsweep_replay.py", "replay.py",
-                 "data/mt5.py", "data/demo.py", "fvg.py", "fvg_replay.py", "fvg_orders.py", "delivery.py"):
+                 "data/mt5.py", "fvg.py", "fvg_replay.py", "fvg_orders.py", "delivery.py"):
         path = root / name
         if path.exists():
             assert not imports.search(path.read_text(encoding="utf-8")), name

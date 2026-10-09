@@ -8,6 +8,9 @@
 @source "./index.template.html";  /* scan the template: index.html is generated after the CSS step */
 @source "../../app/static/app.js";
 @source "../../app/static/market-chart.js";
+@source "../../app/static/fvg-guide.js";
+@source "../../app/static/fvg-engines.js";
+@source "../../app/static/fvg-signals.js";
 
 @font-face {
   font-family: "Inter Tight";
@@ -216,7 +219,44 @@
   .vc-view { display: none; }
   html:not([data-view]) #overview,
   html[data-view="overview"] #overview, html[data-view="chart"] #chart-section, html[data-view="signals"] #signals-section,
-  html[data-view="setups"] #setups-section, html[data-view="replay"] #replay-section, html[data-view="system"] #system-section { display: block; }
+  html[data-view="setups"] #setups-section, html[data-view="replay"] #replay-section, html[data-view="system"] #system-section,
+  html[data-view="guide"] #guide-section, html[data-view="engines"] #engines-section { display: block; }
+
+  /* ---------- FVG guide ---------- */
+  .vc-gnext { padding: 12px 14px; border-radius: 12px; border: 1px solid color-mix(in oklab, var(--vc-primary) 40%, transparent);
+    background: var(--vc-primary-soft); }
+  .vc-gsteps { display: flex; flex-direction: column; gap: 10px; }
+  .vc-gstep { padding: 10px 12px; border-radius: 12px; background: var(--vc-control); border: 1px solid var(--vc-border); }
+  .vc-gstep-mark { display: inline-flex; width: 22px; height: 22px; align-items: center; justify-content: center; border-radius: 999px;
+    font-weight: 700; background: var(--vc-rail); }
+  .vc-gstep-done .vc-gstep-mark { background: color-mix(in oklab, var(--vc-success) 25%, transparent); color: var(--vc-success); }
+  .vc-gstep-waiting .vc-gstep-mark { background: color-mix(in oklab, var(--vc-info) 25%, transparent); color: var(--vc-info); }
+  .vc-gstep-failed .vc-gstep-mark { background: color-mix(in oklab, var(--vc-danger) 25%, transparent); color: var(--vc-danger); }
+  .vc-gstep-skipped .vc-gstep-mark { background: color-mix(in oklab, var(--vc-warning) 25%, transparent); color: var(--vc-warning); }
+  /* on phones the chart keeps a readable size and scrolls sideways inside its own frame (never the page) */
+  .vc-gchart-wrap { border: 1px solid var(--vc-border); border-radius: 12px; background: var(--chart-bg); overflow-x: auto; overflow-y: hidden; }
+  .vc-gchart { display: block; width: 100%; min-width: 620px; height: auto; }
+  .vc-gzone { fill: var(--zone-fvg); fill-opacity: .14; stroke: var(--zone-fvg); stroke-dasharray: 4 3; }
+  .vc-gzone-m5 { fill: var(--chart-level); stroke: var(--chart-level); fill-opacity: .10; } /* dual lessons: M15 zone uses the default colour */
+  .vc-gwick { stroke: var(--chart-text); stroke-width: 1; }
+  .vc-gup .vc-gbody { fill: var(--chart-up); }
+  .vc-gdown .vc-gbody { fill: var(--chart-down); }
+  .vc-gforming .vc-gbody { fill-opacity: .35; stroke: var(--chart-text); stroke-dasharray: 2 2; }
+  .vc-gcandle:focus { outline: none; }
+  .vc-gcandle:focus .vc-gbody, .vc-gcandle:hover .vc-gbody { stroke: var(--vc-primary); stroke-width: 2; }
+  .vc-gline { stroke-width: 1.2; }
+  .vc-gline-level { stroke: var(--chart-level); stroke-dasharray: 6 4; stroke-width: 1.6; }
+  .vc-gline-entry { stroke: var(--chart-entry); stroke-dasharray: 3 3; }
+  .vc-gline-sl { stroke: var(--chart-sl); }
+  .vc-gline-tp { stroke: var(--chart-tp); stroke-dasharray: 1 3; }
+  .vc-glabel { font-size: 11px; fill: var(--chart-text); }
+  .vc-gleader { stroke: var(--chart-text); stroke-width: 1; opacity: 0.6; }
+  .vc-link { color: var(--vc-primary); text-decoration: underline; font-weight: 600; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+  .vc-glabel-level { fill: var(--chart-level); font-weight: 600; }
+  .vc-glabel-sl { fill: var(--chart-sl); } .vc-glabel-tp { fill: var(--chart-tp); } .vc-glabel-entry { fill: var(--chart-text); }
+  .vc-gtag { font-size: 11px; font-weight: 700; fill: var(--vc-text); }
+  .vc-gtag-abc { fill: var(--vc-primary); } .vc-gtag-retest { fill: var(--chart-level); }
+  .vc-gtag-ok { fill: var(--chart-up); } .vc-gtag-no { fill: var(--vc-muted); }
 
   .lw-chart { height: 480px; }
   @media (max-width: 640px) { .lw-chart { height: 340px; } }
@@ -230,4 +270,106 @@
   .vc-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
   .vc-scroll::-webkit-scrollbar-thumb { background: var(--vc-border-strong); border-radius: 8px; }
   .vc-scroll::-webkit-scrollbar-track { background: transparent; }
+
+  /* ---- shared interaction system (task 20261008-152656) --------------------------------------------------------
+     Control feedback ~150 ms, panel/view motion ~210 ms; transform/opacity only. Hover styles apply to ENABLED targets;
+     :active gives the same pressed feedback on touch. prefers-reduced-motion removes movement (see the end). */
+  :root { --vc-ease: cubic-bezier(.2, .7, .2, 1); --vc-t-fast: 150ms; --vc-t-panel: 210ms; }
+  .vc-btn, .vc-nav-item, .vc-tab, .vc-pill, .vc-link, .vc-action-card, .vc-rec, .vc-leg-summary, .vc-disclosure > summary, .vc-seg > button,
+  .vc-help > summary, .vc-table tbody tr.vc-row-click td, select, input[type="text"], input[type="number"], input:not([type]), textarea {
+    transition: background-color var(--vc-t-fast) var(--vc-ease), border-color var(--vc-t-fast) var(--vc-ease),
+      color var(--vc-t-fast) var(--vc-ease), box-shadow var(--vc-t-fast) var(--vc-ease), transform var(--vc-t-fast) var(--vc-ease),
+      opacity var(--vc-t-fast) var(--vc-ease), filter var(--vc-t-fast) var(--vc-ease);
+  }
+  .vc-btn:not(:disabled):active, .vc-tab:not(:disabled):active, .vc-pill:not(:has(input:disabled)):active,
+  .vc-nav-item:active, .vc-action-card:active, .vc-rec:active, .vc-leg-summary:active, .vc-seg > button:active { transform: translateY(1px) scale(.985); }
+  .vc-seg > button:not([aria-pressed="true"]):hover { background: color-mix(in oklab, var(--vc-bg) 55%, transparent); }
+  .vc-btn:disabled:hover { border-color: var(--vc-border); background: var(--vc-control); }
+  .vc-btn-primary:disabled:hover { background: var(--vc-primary); filter: none; }
+  .vc-btn[aria-busy="true"] { pointer-events: none; opacity: .8; }
+  .vc-btn[aria-busy="true"]::after { content: ""; width: 12px; height: 12px; border-radius: 999px; border: 2px solid currentColor;
+    border-right-color: transparent; animation: vc-spin .7s linear infinite; }
+  .vc-link:hover { filter: brightness(1.2); text-decoration-thickness: 2px; }
+  .vc-pill:not(:has(input:disabled)):hover { border-color: var(--vc-border-strong); }
+  .vc-tab:not([aria-selected="true"]):hover { background: color-mix(in oklab, var(--vc-bg) 55%, transparent); }
+  select:not(:disabled):hover, input:not(:disabled):not([type="checkbox"]):not([type="radio"]):not([type="range"]):hover,
+  textarea:not(:disabled):hover { border-color: var(--vc-border-strong); }
+  .vc-table tbody tr.vc-row-click:focus-visible { outline: 2px solid var(--vc-primary); outline-offset: -2px; }
+  .vc-table tbody tr.vc-row-click:focus-visible td { background: var(--vc-rail); }
+  .vc-table tbody tr.vc-row-click:active td { background: var(--vc-primary-soft); }
+
+  /* real view changes fade/slide in once (class set by nav.js only when the view actually changes) */
+  .vc-view.vc-entering { animation: vc-enter var(--vc-t-panel) var(--vc-ease) both; }
+  /* disclosure content reveals once when opened */
+  details[open] > :not(summary) { animation: vc-reveal var(--vc-t-panel) var(--vc-ease) both; }
+  .vc-disclosure > summary { cursor: pointer; color: var(--vc-primary); font-weight: 600; font-size: 13px; list-style: none; border-radius: 6px; width: fit-content; }
+  .vc-disclosure > summary::-webkit-details-marker { display: none; }
+  .vc-disclosure > summary::before { content: "▸"; display: inline-block; margin-right: 6px; transition: transform var(--vc-t-fast) var(--vc-ease); }
+  .vc-disclosure[open] > summary::before { transform: rotate(90deg); }
+  .vc-disclosure > summary:hover { filter: brightness(1.2); }
+  @keyframes vc-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  @keyframes vc-reveal { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+  @keyframes vc-spin { to { transform: rotate(360deg); } }
+  @keyframes vc-load { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+
+  /* button-shaped cards: the whole card is ONE native button with a labelled action */
+  .vc-action-card { display: grid; gap: 6px; text-align: left; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--vc-border);
+    background: var(--vc-control); color: var(--vc-text); min-width: 0; }
+  .vc-action-card:hover { border-color: color-mix(in oklab, var(--vc-primary) 55%, var(--vc-border)); background: var(--vc-rail); }
+  .vc-action-card-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 14px; }
+  .vc-action-card-go { color: var(--vc-primary); font-size: 12px; font-weight: 600; }
+  .vc-action-card:hover .vc-action-card-go { text-decoration: underline; }
+
+  /* ---- FVG Engines view ---- */
+  .vc-en-strip { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+  .vc-en-strip > div { padding: 10px 12px; border-radius: 12px; border: 1px solid var(--vc-border); background: var(--vc-surface); min-width: 0; }
+  .vc-en-strip dd { margin-top: 4px; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+  .vc-en-panel { scroll-margin-top: 72px; }
+  .vc-en-panel:focus-visible { outline: 2px solid var(--vc-primary); outline-offset: 2px; }
+  .vc-en-next { margin-top: 10px; font-size: 15px; font-weight: 600; line-height: 1.35; }
+  .vc-en-ready { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  .vc-en-ready .vc-progress { flex: 1; margin-top: 0; }
+  .vc-en-mini { margin-top: 6px; font-size: 13px; color: var(--vc-muted); }
+  .vc-en-zone { margin-top: 10px; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+  .vc-en-slot { margin-top: 4px; font-size: 13px; color: var(--vc-muted); overflow-wrap: anywhere; }
+  .vc-progress { position: relative; margin-top: 10px; height: 8px; border-radius: 999px; background: var(--vc-control); overflow: hidden; }
+  .vc-progress-bar { height: 100%; width: 0; border-radius: 999px; background: var(--vc-primary); transition: width 420ms var(--vc-ease); }
+  .vc-en-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin-top: 10px; font-size: 13px; }
+  .vc-en-facts dt, .vc-en-decision dt { color: var(--vc-muted); }
+  @media (min-width: 640px) { .vc-en-facts { grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr); } }
+  .vc-en-chart { position: relative; height: 300px; border: 1px solid var(--vc-border); border-radius: 12px; overflow: hidden; background: var(--chart-bg); }
+  .vc-en-decision { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; font-size: 13px; }
+  .vc-rc-passed > span:nth-child(2) { color: var(--vc-success, #12b76a); }
+  .vc-rc-failed > span:nth-child(2) { color: var(--vc-danger); font-weight: 600; }
+  .vc-rc-not_evaluated > span:nth-child(2), .vc-rc-unavailable > span:nth-child(2) { color: var(--vc-muted); }
+  .vc-leg { border: 1px solid var(--vc-border); border-radius: 10px; background: var(--vc-surface); }
+  .vc-leg-summary { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; padding: 8px 10px; cursor: pointer;
+    list-style: none; font-size: 13px; border-radius: 10px; }
+  .vc-leg-summary::-webkit-details-marker { display: none; }
+  .vc-leg-summary:hover { background: var(--vc-rail); }
+  @media (min-width: 900px) { .vc-leg-summary { grid-template-columns: 70px minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr); } }
+  .vc-leg-state { font-weight: 600; }
+  .vc-leg-details { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; padding: 4px 12px 10px; font-size: 12px; }
+  .vc-rec { display: grid; width: 100%; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.2fr) minmax(0, 1fr) max-content; gap: 8px; align-items: center;
+    text-align: left; padding: 7px 10px; border-radius: 10px; border: 1px solid var(--vc-border); background: var(--vc-surface); font-size: 12px; }
+  .vc-rec:hover { border-color: var(--vc-border-strong); background: var(--vc-rail); }
+  .vc-rec-selected, .vc-rec-selected:hover { border-color: color-mix(in oklab, var(--vc-primary) 60%, transparent); background: var(--vc-primary-soft); }
+  .vc-rec-ok { color: var(--vc-success, #12b76a); font-weight: 600; }
+  .vc-rec-tag { font-size: 11px; color: var(--vc-muted); }
+  .vc-sig-detail { padding: 10px 12px; border-radius: 12px; border: 1px solid var(--vc-border); background: var(--vc-surface); }
+  .vc-sig-legs th, .vc-sig-legs td { white-space: nowrap; }
+  #fvg-signals > section[aria-busy="true"] { opacity: .85; }
+  @media (max-width: 520px) { .vc-rec { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  /* outstanding /api/fvg request: a thin indeterminate bar (removed on success AND failure) */
+  #engines-section { position: relative; }
+  #engines-section[aria-busy="true"]::before { content: ""; position: absolute; left: 0; top: -6px; height: 2px; width: 40%;
+    background: var(--vc-primary); border-radius: 2px; animation: vc-load 1.1s var(--vc-ease) infinite; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+      transition-duration: .01ms !important; scroll-behavior: auto !important; }
+    .vc-btn:not(:disabled):active, .vc-tab:active, .vc-pill:active, .vc-nav-item:active, .vc-action-card:active, .vc-rec:active,
+    .vc-leg-summary:active { transform: none; }
+    #engines-section[aria-busy="true"]::before { animation: none; width: 100%; opacity: .5; }
+  }
 }

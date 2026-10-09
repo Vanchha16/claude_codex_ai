@@ -107,8 +107,7 @@ def candidate_key(symbol: str, a_open: datetime, version: str) -> str:
 
 def signal_id(c: Candidate, mode: str) -> str:
     digest = hashlib.sha256(c.key.encode()).hexdigest()[:6].upper()
-    prefix = "DEMO-" if mode == "demo" else ""
-    return f"{prefix}SIG-{c.b_close.strftime('%Y%m%d-%H%M')}-{c.direction}-{digest}"
+    return f"SIG-{c.b_close.strftime('%Y%m%d-%H%M')}-{c.direction}-{digest}"
 
 
 class Engine:

@@ -38,7 +38,7 @@ def setup(tmp_path, handler, configured=True):
         calls.append(request)
         return handler(request)
     clock = Clock()
-    d = Delivery(store, settings, client_factory=lambda tok: TelegramClient(tok, transport=httpx.MockTransport(wrapped)), clock=clock)
+    d = Delivery(store, settings, client_factory=lambda tok: TelegramClient(tok, transport=httpx.MockTransport(wrapped)), clock=clock, source="test")
     return store, d, calls, clock
 
 
@@ -162,7 +162,7 @@ def test_crash_mid_send_becomes_unknown(tmp_path):
     store.enqueue("SIG-X", "signal", "text", NOW + timedelta(minutes=5), NOW)
     oid = store.outbox_rows()[0]["id"]
     store.update_outbox(oid, status="sending")
-    Delivery(store, Settings(telegram_bot_token=TOKEN, telegram_test_chat_id="1"))
+    Delivery(store, Settings(telegram_bot_token=TOKEN, telegram_test_chat_id="1"), source="test")
     assert store.outbox_rows()[0]["status"] == "unknown"
 
 

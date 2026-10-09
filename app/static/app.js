@@ -81,7 +81,7 @@ const TONE = {
   tp: "success", sent: "success", confirmed: "success", running: "success", fresh: "success",
   sl: "error", failed: "error", invalidated: "error", error: "error", stale: "error",
   unknown: "warning", ambiguous: "warning", pending: "info", active: "info", expired: "light", rejected: "light",
-  paused: "warning", demo: "brand", mt5: "success",
+  paused: "warning", mt5: "success",
 };
 const LABEL = { unknown: "UNKNOWN (not resent)", ambiguous: "AMBIGUOUS (excluded from win rate)" };
 function badge(text, tone) {
@@ -107,25 +107,24 @@ async function refreshState() {
   try {
     STATE = await api("/api/state");
   } catch (e) {
+    window.dispatchEvent(new CustomEvent("vc:state-error", { detail: e.message }));  // views keep last-good data, marked stale
     banner(`The dashboard cannot reach the local server: ${e.message}`);
     $("scanner-state").textContent = "unreachable";
     return;
   }
   const s = STATE;
   if (s.owner_error) { banner(s.owner_error); $("scanner-state").textContent = "not owner"; return; }
-  setBadge($("mode-badge"), s.mode === "demo" ? "DEMO · fictional data" : "LIVE · MT5 data", s.mode);
+  setBadge($("mode-badge"), "LIVE · MT5 data", "mt5");
   $("data-label").textContent = s.data_label;
   const act = s.active_strategy || {};
   const tfs = s.timeframes || {};
-  $("page-strategy").textContent = `${tfs.range || "?"} / ${tfs.confirmation || "?"} · ${act.label || "?"}`;
+  $("page-strategy").textContent = tfs.engines ? `${act.label || "?"}` : `${tfs.range || "?"} / ${tfs.confirmation || "?"} · ${act.label || "?"}`;
   $("strategy-kicker").textContent = `Strategy state (${act.label || "?"})`;
   const fsOpt = $("replay-strategy").querySelector('option[value="fastsweep"]');
   if (fsOpt) fsOpt.textContent = act.kind === "fastsweep" ? `FastSweep (active: ${act.label})` : "FastSweep (research, 1:2)";
   const crtOpt = $("replay-strategy").querySelector('option[value="crt"]');
   if (crtOpt) crtOpt.textContent = act.kind === "crt" ? "CRT-SMC-v1 (active)" : "CRT-SMC-v1 (legacy, not active)";
-  $("page-source").textContent = s.mode === "demo" ? "Demo fixture (fictional prices)" : "Live MT5 data (read-only)";
-  $("btn-mode").textContent = s.mode === "demo" ? "Switch to live MT5…" : "Switch to demo…";
-  $("btn-demo-restart").hidden = s.mode !== "demo";
+  $("page-source").textContent = "Live MT5 data (read-only)";
   $("tz-label").textContent = tz() === "local" ? "this browser's time zone" : tz();
 
   const sym = s.symbol;
@@ -134,7 +133,7 @@ async function refreshState() {
     (s.configured_symbol ? `${s.configured_symbol} (not loaded)` : "not selected (choose the exact symbol in Setup)");
   $("ov-symbol").textContent = sym ? `· ${sym.name}` : "";
   $("page-symbol").textContent = symName;
-  $("chart-symbol").textContent = `· ${symName} · ${s.mode === "demo" ? "DEMO (fictional)" : "LIVE MT5"}`;
+  $("chart-symbol").textContent = `· ${symName} · LIVE MT5`;
   const q = s.quote;
   $("quote").textContent = q ? `${fmtP(q.bid, digits())} / ${fmtP(q.ask, digits())}` : "—";
   $("spread").textContent = q ? `${fmtP(q.spread, digits())} (max ${s.strategy.max_spread_price})` : "—";
@@ -144,7 +143,7 @@ async function refreshState() {
   $("provider").textContent = s.provider || "—";
   const acct = s.account || {};
   $("broker").textContent = acct.server ? `${acct.company || "?"} · ${acct.server} (${acct.account_type || "?"} account)` :
-    (s.mode === "demo" ? "— (demo fixture)" : "not connected");
+    "not connected";
   $("feed").textContent = s.feed ? s.feed.message : "—";
   const lc = (s.scanner && s.scanner.last_closed) || {};
   const ready = (s.strategy_state || {}).readiness;
@@ -156,7 +155,7 @@ async function refreshState() {
   $("scanner-state").textContent = sc.error ? "error" : !sc.running ? "stopped" : sc.paused ? "Paused" : "Running";
   $("scanner-state").title = sc.error || (sc.paused ? "No new candidates or alerts; outcome tracking continues" : "");
   $("btn-pause").textContent = sc.paused ? "Resume" : "Pause";
-  $("last-scan").textContent = `${fmtT(sc.last_scan)}${s.demo ? " (simulated clock)" : ""}`;
+  $("last-scan").textContent = fmtT(sc.last_scan);
   $("live-start").textContent = fmtT(sc.session_watermark || sc.live_start);
   $("issues").textContent = sc.data_issues && sc.data_issues.length ? sc.data_issues.join("; ") : (sc.error ? sc.error : "ok");
   const ss = s.strategy_state || {};
@@ -168,7 +167,7 @@ async function refreshState() {
   else if (sc.paused) dotChip($("strategy-chip"), "Paused", "warning");
   else if (!feedOk) dotChip($("strategy-chip"), "Feed offline", "error");
   else if (!q || !q.fresh) dotChip($("strategy-chip"), "Quotes not fresh", "warning");
-  else dotChip($("strategy-chip"), s.mode === "demo" ? "Scanning · demo" : "Scanning · live", "success");
+  else dotChip($("strategy-chip"), "Scanning", "success");
 
   renderTelegram(s.telegram || {}, s.setup || {});
   renderSetup(s.setup || {}, s);
@@ -176,7 +175,6 @@ async function refreshState() {
   let warn = null;
   if (s.feed && !s.feed.ok) warn = s.feed.message;
   else if (q && !q.fresh) warn = q.note;
-  else if (s.demo && s.demo.finished) warn = "Demo fixture finished. Press “Restart demo” to replay it.";
   else if (sc.error) warn = `Scanner error: ${sc.error}`;
   banner(warn);
 
@@ -185,10 +183,12 @@ async function refreshState() {
   dl.replaceChildren();
   for (const [k, v] of Object.entries(s.strategy)) {
     if (k === "version") continue;
-    dl.append(el("dt", k, "vc-muted"), el("dd", v, "vc-num break-words"));
+    const text = v !== null && typeof v === "object" ? Object.entries(v).map(([a, b]) => `${a}: ${b}`).join(" · ") : v;
+    dl.append(el("dt", k, "vc-muted"), el("dd", text, "vc-num break-words"));
   }
   $("btn-replay").disabled = s.replay_running;
   renderFvg(s.fvg || {}, act);
+  window.dispatchEvent(new CustomEvent("vc:state", { detail: s }));  // read-only consumers (FVG Engines) reuse this poll
 }
 
 // ------------------------------------------------------------------ FVG automatic execution (default OFF)
@@ -201,7 +201,19 @@ function renderFvg(f, act) {
   $("fvg-reason").textContent = on
     ? (f.armed_by === "you" ? `armed by you ${fmtT(f.armed_at)}` : `ON by ${f.armed_by || "default"}`)
     : (f.reason || "OFF");
-  $("fvg-budget").textContent = f.risk_configured ? `${money(f.risk_usd)} total planned SL risk per setup` : "not configured";
+  const dual = f.mode === "dual";
+  $("fvg-budget-label").textContent = dual ? "Risk per basket" : "Combined risk budget";
+  $("fvg-budget").textContent = !f.risk_configured ? "not configured" : dual
+    ? `${money(f.risk_usd)} planned SL risk per basket · one basket per engine · up to ${money(f.max_concurrent_risk_usd)} at once`
+    : `${money(f.risk_usd)} total planned SL risk per setup`;
+  renderFvgEngines(f.dual || null);
+  if (dual) {
+    $("fvg-desc").textContent = "FVG dual mode: an M15 engine and an M5 engine each place three pending limit orders (1% / 50% / 80% of "
+      + "their own gap, one common stop, 1:2 target each) as soon as their gap qualifies at candle C's close. One basket per engine, "
+      + "the risk budget per basket (up to two budgets at once), a 30-minute cooldown per engine and 4 baskets per Bangkok day in total. "
+      + "Lots are rounded down; fees, gaps and slippage can make losses larger. Bound to this source, symbol, account and the dual "
+      + "rule version. CRT and FastSweep stay alert-only and never trade.";
+  }
   $("fvg-share").textContent = f.risk_configured ? `${money(f.risk_usd / 3)} per leg before lot rounding` : "—";
   $("fvg-pct").textContent = f.risk_pct_of_equity !== null && f.risk_pct_of_equity !== undefined
     ? `${f.risk_pct_of_equity}% of equity (${money(f.equity_usd)}, account ${f.account_currency})` : "— (needs live MT5 account)";
@@ -212,34 +224,86 @@ function renderFvg(f, act) {
   $("fvg-baskets-wrap").classList.toggle("hidden", !f.strategy_active);
   if (f.strategy_active && Date.now() - fvgBasketsAt > 10000) {
     fvgBasketsAt = Date.now();
-    api("/api/fvg?limit=20").then((r) => renderFvgBaskets(r.baskets || [])).catch(() => {});
+    // partitioned on the server before the limit, so one engine never crowds out the other
+    Promise.all(["M15", "M5", "legacy"].map((e) => api(`/api/fvg?engine=${e}&limit=10`).then((r) => r.baskets || []).catch(() => null)))
+      .then(([m15, m5, legacy]) => renderFvgBaskets({ M15: m15, M5: m5, legacy })).catch(() => {});
   }
 }
 
-function renderFvgBaskets(baskets) {
-  const body = $("fvg-baskets");
+function renderFvgEngines(d) {
+  $("fvg-engines-wrap").classList.toggle("hidden", !d);
+  if (!d) return;
+  const day = d.daily || {};
+  $("fvg-dual-summary").textContent = `${day.accepted ?? "—"}/${day.cap ?? "—"} baskets today (both engines) · cooldown ${d.scopes ? d.scopes.cooldown : "—"}`;
+  const body = $("fvg-engines");
   body.replaceChildren();
-  if (!baskets.length) {
-    const tr = el("tr"); const td = el("td", "No baskets yet.", "vc-faint"); td.colSpan = 7; tr.append(td); body.append(tr);
-    return;
-  }
-  const d = digits();
-  for (const b of baskets) {
-    const ex = b.execution || {};
-    const planned = (ex.legs || []);
-    const legs = (b.legs || []).map((l, i) => {
-      const p = planned[i] || {};
-      const lots = p.volume !== undefined ? `${p.volume} lot` : "not sized";
-      const risk = VCFvgDisplay.legRisk(p.planned_loss, ex.account_currency);  // account units -> USD only when known
-      const loss = risk ? ` · planned loss ${risk}` : "";
-      return `${l.pct}%: ${fmtP(l.entry, d)} · TP ${fmtP(l.tp, d)} · ${lots}${loss}${p.state ? ` (${p.state})` : ""}`;
-    }).join("\n");
+  for (const e of ["M15", "M5"]) {
+    const x = (d.engines || {})[e] || {};
+    const r = x.readiness || {};
+    const ready = r.ready ? `ready (${r.run} candles)` : r.run != null ? `warm-up ${r.run}/${r.required}${r.ready_eta ? ` · ~${fmtT(r.ready_eta)}` : ""}` : "—";
+    const ls = x.last_setup;
+    const last = ls ? `${ls.direction} ${fmtP(ls.bottom, digits())}–${fmtP(ls.top, digits())} · ${ls.status}${ls.reason ? ` (${ls.reason})` : ""}` : "none yet";
+    const slot = x.slot ? `${x.slot.basket} (${x.slot.status})${x.slot.legacy ? " · legacy v1" : ""}` : "free";
     const tr = el("tr");
-    const legCell = el("td", legs, "vc-num whitespace-pre-line");
-    tr.append(el("td", fmtT(b.placed_at), "vc-num"), el("td", b.direction), el("td", `${fmtP(b.bottom, d)}–${fmtP(b.top, d)}`, "vc-num"),
-      legCell, el("td", fmtP(b.sl, d), "vc-num"), el("td", b.status),
-      el("td", `${ex.state || "—"}${ex.reason ? ` (${ex.reason})` : ""}`, "break-words"));
+    tr.append(el("td", `${e}`, "font-semibold"), el("td", `${ready} · next close ${fmtT(r.next_close)}`, "vc-num"),
+      el("td", `${r.trend || "n/a"} · ${r.atr14 ?? "—"}`), el("td", last, "break-words"), el("td", slot, "break-words"),
+      el("td", x.cooldown_until ? `until ${fmtT(x.cooldown_until)}` : "none", "vc-num"));
     body.append(tr);
+  }
+}
+
+/** System: one basket list PER ENGINE (and legacy), never one combined list; each links to its Signals panel. */
+function renderFvgBaskets(groups) {
+  const box = $("fvg-baskets");
+  box.replaceChildren();
+  const d = digits();
+  for (const [key, title] of [["M15", "M15 baskets"], ["M5", "M5 baskets"], ["legacy", "Legacy / unclassified baskets"]]) {
+    const list = groups[key];
+    if (key === "legacy" && (!list || !list.length)) continue;
+    const sec = el("section");
+    const head = el("div", null, "mb-1 flex flex-wrap items-baseline justify-between gap-2");
+    head.append(el("h4", title, "vc-label"));
+    if (key !== "legacy") {
+      const go = el("a", `Open ${key} Signals →`, "vc-link text-[12px]");
+      go.href = "#signals-section";
+      go.onclick = (ev) => { ev.preventDefault(); VCNav.go("signals"); const p = $(`sig-${key}`); if (p) p.scrollIntoView({ block: "start" }); };
+      head.append(go);
+    }
+    sec.append(head);
+    if (list === null) { sec.append(el("p", "Could not load.", "vc-faint text-[12px]")); box.append(sec); continue; }
+    if (!list.length) { sec.append(el("p", "None yet.", "vc-faint text-[12px]")); box.append(sec); continue; }
+    const table = el("table", null, "vc-table w-full text-[12px]");
+    const hr = el("tr");
+    for (const h of ["Placed", "Side", "Zone", "Legs (entry · TP · lots · planned loss)", "SL", "Status", "Execution"]) hr.append(el("th", h));
+    const thead = el("thead"); thead.append(hr);
+    const body = el("tbody");
+    for (const b of list) {
+      const ex = b.execution || {};
+      const planned = (ex.legs || []);
+      const legs = (b.legs || []).map((l, i) => {
+        const p = planned[i] || {};
+        const lots = p.volume !== undefined ? `${p.volume} lot` : "not sized";
+        const risk = VCFvgDisplay.legRisk(p.planned_loss, ex.account_currency);  // account units -> USD only when known
+        const loss = risk ? ` · planned loss ${risk}` : "";
+        return `${l.pct}%: ${fmtP(l.entry, d)} · TP ${fmtP(l.tp, d)} · ${lots}${loss}${p.state ? ` (${p.state})` : ""}`;
+      }).join("\n");
+      const tr = el("tr");
+      const statusCell = el("td", b.status);
+      if (b.setup_key && window.VCGuide && window.VCNav) {  // open this basket's setup in the read-only FVG Guide
+        const go = el("button", "Explain in FVG Guide", "vc-link mt-1 block text-[12px]");
+        go.type = "button";
+        go.onclick = () => { VCGuide.openRecord(b.setup_key); VCNav.go("guide"); };
+        statusCell.append(go);
+      }
+      tr.append(el("td", fmtT(b.placed_at), "vc-num"), el("td", key === "legacy" ? `${b.direction} · ${b.engine || "legacy v1"}` : b.direction),
+        el("td", `${fmtP(b.bottom, d)}–${fmtP(b.top, d)}`, "vc-num"), el("td", legs, "vc-num whitespace-pre-line"),
+        el("td", fmtP(b.sl, d), "vc-num"), statusCell, el("td", `${ex.state || "—"}${ex.reason ? ` (${ex.reason})` : ""}`, "break-words"));
+      body.append(tr);
+    }
+    table.append(thead, body);
+    const wrap = el("div", null, "vc-scroll overflow-x-auto"); wrap.append(table);
+    sec.append(wrap);
+    box.append(sec);
   }
 }
 
@@ -270,13 +334,13 @@ function renderTelegram(tg, setup) {
   $("btn-tg-test").disabled = !tg.configured;
   $("btn-tg-verify").disabled = !(setup.telegram_token === "configured" && setup.telegram_chat_id);
   $("tg-note").textContent = tg.note || "";
-  $("sum-delivery").textContent = tg.configured ? `delivery ${tg.enabled ? "ON" : "OFF"}${tg.mode === "mt5" ? " · live" : " · demo"}`
+  $("sum-delivery").textContent = tg.configured ? `delivery ${tg.enabled ? "ON" : "OFF"}`
     : `missing: ${(tg.missing || []).join(", ") || "setup"}`;
 }
 
 function renderSetup(setup, s) {
   const locked = new Set(setup.locked_by_environment || []);
-  const fields = { "setup-source": "data_mode", "setup-symbol": "symbol", "setup-terminal": "mt5_terminal_path",
+  const fields = { "setup-symbol": "symbol", "setup-terminal": "mt5_terminal_path",
     "setup-chat": "telegram_test_chat_id", "setup-tz": "display_timezone" };
   for (const [id, key] of Object.entries(fields)) {
     $(id).disabled = locked.has(key);
@@ -287,7 +351,6 @@ function renderSetup(setup, s) {
   const acct = setup.account || {};
   $("setup-account").textContent = acct.server ? `MT5: ${acct.company || ""} · ${acct.server} · ${acct.account_type || ""}` : "";
   if (setupDirty) return; // don't overwrite what the user is editing
-  $("setup-source").value = setup.data_mode || s.mode;
   $("setup-terminal").value = setup.mt5_terminal_path || "";
   $("setup-chat").value = setup.telegram_chat_id || "";
   $("setup-tz").value = setup.display_timezone || "UTC";
@@ -678,7 +741,7 @@ async function showSelected(open) {
 // ------------------------------------------------------------------ replay
 async function refreshReplay() {
   const box = $("replay");
-  const source = $("replay-source").value;
+  const source = "mt5";
   const strategy = $("replay-strategy").value;
   let r;
   try { r = await api(`/api/replay?source=${source}&strategy=${strategy}`); } catch (e) {
@@ -752,24 +815,9 @@ $("btn-pause").onclick = async () => {
   try { await api(`/api/scanner/${STATE.scanner.paused ? "resume" : "pause"}`, { method: "POST" }); refreshState(); }
   catch (e) { alertBanner(e); }
 };
-$("btn-demo-restart").onclick = async () => {
-  try { await api("/api/demo/restart", { method: "POST" }); selected = null; selectedRec = null; refreshState(); refreshTables(); if (CHART) CHART.load(); } catch (e) { alertBanner(e); }
-};
-$("btn-mode").onclick = async () => {
-  const target = STATE.mode === "demo" ? "mt5" : "demo";
-  const msg = target === "mt5"
-    ? "Switch to LIVE MT5? VC Signal will read live data from your running, logged-in MetaTrader 5 terminal. CRT/FastSweep never trade; FVG places pending orders only if its automatic execution is ON for this server+login. The choice is saved and survives restarts."
-    : "Switch to DEMO (fictional data)? The choice is saved and survives restarts.";
-  if (!window.confirm(msg)) return;
-  try { await api("/api/mode", { method: "POST", body: { mode: target, confirm: true } }); selected = null; selectedRec = null; setupDirty = false; await refreshState(); refreshTables(); if (CHART) CHART.load(); }
-  catch (e) { alertBanner(e); }
-};
 $("tg-enabled").onchange = async (ev) => {
   const want = ev.target.checked;
-  const live = STATE && STATE.mode === "mt5";
-  if (want && !window.confirm(live
-    ? "Enable LIVE delivery? New confirmed LIVE MARKET SIGNALs for this symbol will be sent to the configured Telegram chat. The opt-in is saved for this source, symbol, bot and destination until you disable it."
-    : "Enable delivery? New DEMO TEST SIGNALs (fictional prices) will be sent to the configured Telegram chat for this session.")) {
+  if (want && !window.confirm("Enable LIVE delivery? New confirmed LIVE MARKET SIGNALs for this symbol will be sent to the configured Telegram chat. The opt-in is saved for this source, symbol, bot and destination until you disable it.")) {
     ev.target.checked = false; return;
   }
   try { await api("/api/telegram/enabled", { method: "POST", body: { enabled: want } }); refreshState(); }
@@ -793,7 +841,7 @@ $("btn-tg-verify").onclick = async () => {
   finally { $("btn-tg-verify").disabled = false; }
 };
 $("btn-replay").onclick = async () => {
-  const source = $("replay-source").value;
+  const source = "mt5";
   const days = Number($("replay-days").value || 60);
   try {
     const strategy = $("replay-strategy").value;
@@ -802,17 +850,12 @@ $("btn-replay").onclick = async () => {
     setTimeout(refreshReplay, 2000);
   } catch (e) { alertBanner(e); }
 };
-$("replay-source").onchange = () => {
-  const mt5 = $("replay-source").value === "mt5";
-  const fs = $("replay-strategy").value === "fastsweep";
-  $("replay-days").disabled = !mt5; $("replay-ticks").disabled = !mt5 || fs;  // FastSweep replay is OHLC only
+function replayControls() {
+  $("replay-ticks").disabled = $("replay-strategy").value === "fastsweep";  // FastSweep replay is OHLC only
   refreshReplay();
-};
-$("replay-strategy").onchange = () => {
-  if ($("replay-strategy").value === "fastsweep") $("replay-source").value = "mt5";  // FastSweep replay needs MT5 history
-  $("replay-source").onchange();
-};
-for (const id of ["setup-source", "setup-symbol", "setup-terminal", "setup-chat", "setup-tz"]) $(id).addEventListener("input", () => { setupDirty = true; });
+}
+$("replay-strategy").onchange = replayControls;
+for (const id of ["setup-symbol", "setup-terminal", "setup-chat", "setup-tz"]) $(id).addEventListener("input", () => { setupDirty = true; });
 $("btn-discover").onclick = async () => {
   $("setup-msg").textContent = "Looking for gold symbols in your MT5 terminal…";
   try {
@@ -827,13 +870,13 @@ $("btn-discover").onclick = async () => {
 $("setup-form").onsubmit = async (ev) => {
   ev.preventDefault();
   const body = {};
-  const map = { data_mode: "setup-source", symbol: "setup-symbol", mt5_terminal_path: "setup-terminal",
+  const map = { symbol: "setup-symbol", mt5_terminal_path: "setup-terminal",
     telegram_test_chat_id: "setup-chat", display_timezone: "setup-tz" };
   for (const [key, id] of Object.entries(map)) if (!$(id).disabled) body[key] = $(id).value.trim();
   const cur = STATE.setup || {};
-  const restarts = body.data_mode !== (cur.data_mode || STATE.mode) || (body.symbol || "") !== (cur.symbol || "") ||
+  const restarts = (body.symbol || "") !== (cur.symbol || "") ||
     (body.mt5_terminal_path || "") !== (cur.mt5_terminal_path || "");
-  if (restarts && !window.confirm("Save and start a new scanner session with this source/symbol? Earlier confirmations are not replayed; history is kept per symbol.")) return;
+  if (restarts && !window.confirm("Save and start a new scanner session with this symbol? Earlier confirmations are not replayed; history is kept per symbol.")) return;
   $("btn-setup-save").disabled = true;
   try {
     const r = await api("/api/setup", { method: "POST", body });
@@ -847,6 +890,20 @@ $("setup-form").onsubmit = async (ev) => {
 };
 for (const id of ["f-sig-dir", "f-sig-out", "f-cand-status"]) $(id).onchange = refreshTables;
 
+// Loading feedback for existing async buttons: the SAME handler runs with the same event; the button only shows
+// aria-busy (spinner, no double activation) until its request settles, on success and on failure alike.
+for (const id of ["btn-pause", "btn-fvg-arm", "btn-fvg-disarm", "btn-tg-test", "btn-tg-verify",
+  "btn-replay", "btn-discover"]) {
+  const b = $(id);
+  const orig = b && b.onclick;
+  if (!orig) continue;
+  b.onclick = async (ev) => {
+    if (b.getAttribute("aria-busy") === "true") return;
+    b.setAttribute("aria-busy", "true");
+    try { return await orig.call(b, ev); } finally { b.removeAttribute("aria-busy"); }
+  };
+}
+
 messageRow("signals", 11, "Loading signals…");
 messageRow("candidates", 7, "Loading setups…");
 async function loop() {
@@ -856,7 +913,7 @@ async function loop() {
 }
 refreshState().then(async () => { // the selected view is already shown by nav.js; nothing here moves it
   initChart();
-  $("replay-source").onchange();
+  replayControls();
   refreshTools();
   await Promise.allSettled([refreshTables(), refreshReplay()]);
 });

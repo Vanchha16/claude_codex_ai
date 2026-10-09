@@ -1,11 +1,11 @@
 "use strict";
-// Dashboard view router: each sidebar item opens its own main view; exactly one of the six views is shown at a time.
+// Dashboard view router: each sidebar item opens its own main view; exactly one of the eight views is shown at a time.
 // One state source (this module) drives the visible view, the Alpine `selected` value (sidebar styling), the URL hash
 // and the remembered view. Priority on load: recognised URL hash > remembered view (localStorage, if readable) > Overview.
 // Browser Back/Forward move between views through real history entries. There is no scroll-driven selection.
 (function (root) {
   const SECTIONS = { overview: "overview", chart: "chart-section", signals: "signals-section", setups: "setups-section",
-    replay: "replay-section", system: "system-section" };
+    engines: "engines-section", guide: "guide-section", replay: "replay-section", system: "system-section" };
   const KEY = "vcSection";
   const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
   const byAnchor = {};
@@ -28,11 +28,19 @@
   const listeners = [];
 
   /** Show exactly one view (hidden views leave layout, tab order and the accessibility tree). */
-  function apply(k) {
+  function apply(k, animate) {
     document.documentElement.dataset.view = k;
     for (const [key, id] of Object.entries(SECTIONS)) {
       const el = document.getElementById(id);
       if (el) el.hidden = key !== k;
+      // a short CSS enter transition for REAL view changes only (never the first paint, never a background poll);
+      // it never delays the switch, and prefers-reduced-motion removes the movement in CSS
+      if (el && animate && key === k && el.classList) {
+        el.classList.remove("vc-entering");
+        void el.offsetWidth;
+        el.classList.add("vc-entering");
+        el.addEventListener("animationend", () => el.classList.remove("vc-entering"), { once: true });
+      }
     }
     const sc = document.getElementById("content");
     if (sc) sc.scrollTop = 0; // every view starts at its own top
@@ -59,8 +67,9 @@
     const mode = (opts && opts.history) || "push";
     if (mode !== "none") setUrl(k, mode === "push");
     if (k === current) { syncAlpine(k); return true; }
+    const first = current === null;
     current = k;
-    apply(k);
+    apply(k, !first);
     store(k);
     syncAlpine(k);
     for (const fn of listeners) { try { fn(k); } catch (e) { /* a listener must not break navigation */ } }

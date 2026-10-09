@@ -13,7 +13,7 @@ A_OPEN = T0 + timedelta(hours=1)
 B_OPEN = T0 + timedelta(hours=2)
 B_CLOSE = T0 + timedelta(hours=3)
 CONFIRM_CLOSE = B_CLOSE + 2 * M5  # second bar after B closes above the 2405 level
-META = SymbolMeta("TEST-XAU", 0.01, 0.01, 2, "demo")
+META = SymbolMeta("TEST-XAU", 0.01, 0.01, 2, "test")
 CFG = StrategyConfig()
 
 

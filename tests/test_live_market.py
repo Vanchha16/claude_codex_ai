@@ -152,7 +152,7 @@ def test_configured_live_source_survives_restart_without_demo_fallback(tmp_path)
     c, token, local = make_client(tmp_path)
     with c:
         st = c.get("/api/state").json()
-        assert st["mode"] == "mt5" and st["feed"]["state"] == "disconnected" and st["demo"] is None
+        assert st["mode"] == "mt5" and st["feed"]["state"] == "disconnected" and "demo" not in st
         assert st["strategy_state"]["state"] == "disconnected"
         bars = c.get("/api/market/bars?tf=M5").json()
         assert bars["available"] is False and bars["bars"] == []  # no fictional substitute
@@ -191,11 +191,14 @@ def test_setup_flow_selects_exact_symbol_and_opens_new_session(tmp_path):
         assert c.get("/api/market/bars?tf=M5&count=5000").status_code == 400
 
 
-def test_demo_chart_without_any_setup_and_unavailable_m1(tmp_path):
-    c, token, local = make_client(tmp_path, data_mode="demo")
+def test_chart_without_any_setup_and_unavailable_m1(tmp_path):
+    from tests.conftest import fixture_factory
+    app = create_app(Settings(port=8000), state_dir=tmp_path / "state", extra_hosts=("testserver",),
+                     active_strategy_loader=lambda: ActiveStrategy("crt"), feed_factory=fixture_factory)
+    c = TestClient(app)
     with c:
         m5 = c.get("/api/market/bars?tf=M5&count=50").json()
-        assert m5["available"] and m5["source"] == "demo" and len(m5["bars"]) == 50
+        assert m5["available"] and m5["source"] == "mt5" and len(m5["bars"]) == 50
         assert m5["forming"] is None or m5["forming"]["forming"] is True
         m1 = c.get("/api/market/bars?tf=M1").json()
         assert m1["available"] is False and "not available" in m1["reason"]
@@ -212,11 +215,11 @@ def make_signal(mode="mt5", direction="SELL", created=NOW):
                   meta={"symbol": {"digits": 2}}, last_checked=created)
 
 
-def test_messages_are_four_fields_for_every_mode_and_side():
+def test_messages_are_four_fields_for_every_side():
     sell = "📍 Entry: 2400.00\n🎯 TP: 2390.00\n🛑 SL: 2405.00\n⚖️ RR: 2.00"
     buy = "📍 Entry: 2400.20\n🎯 TP: 2410.00\n🛑 SL: 2395.00\n⚖️ RR: 2.00"
-    assert format_signal(make_signal("mt5", "SELL")) == sell == format_signal(make_signal("demo", "SELL"))
-    assert format_signal(make_signal("mt5", "BUY")) == buy == format_signal(make_signal("demo", "BUY"))
+    assert format_signal(make_signal("mt5", "SELL")) == sell
+    assert format_signal(make_signal("mt5", "BUY")) == buy
 
 
 # ------------------------------------------------------------------ measured outcomes
@@ -287,7 +290,7 @@ def test_delivery_optin_persists_only_for_the_same_live_binding(tmp_path):
     saved = (tmp_path / "optin.json").read_text(encoding="utf-8")
     assert TOKEN not in saved and "XAUUSD" in saved
     assert make_delivery(tmp_path).enabled is True  # restart restores the explicit opt-in
-    assert make_delivery(tmp_path, source="demo", symbol="").enabled is False  # demo never inherits it
+    assert make_delivery(tmp_path, source="test", symbol="").enabled is False  # a non-MT5 source never inherits it
     assert (tmp_path / "optin.json").exists()
     changed = make_delivery(tmp_path, chat="-1009999999999")
     assert changed.enabled is False and "chat" in changed.optin_note and not (tmp_path / "optin.json").exists()
@@ -354,7 +357,7 @@ def test_second_process_cannot_own_scanner_and_recovers_after_owner_dies(tmp_pat
 
 
 def test_second_app_in_same_state_dir_serves_no_scanner(tmp_path):
-    c1, _, _ = make_client(tmp_path, data_mode="demo")
+    c1, _, _ = make_client(tmp_path)
     with c1:
         loader = lambda: load_settings(env={}, local_path=tmp_path / "local_settings.json")
         lock = OwnerLock(tmp_path / "state" / "owner.lock")

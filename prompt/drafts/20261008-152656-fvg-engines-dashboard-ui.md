@@ -1,0 +1,84 @@
+# Show both FVG engines and add dashboard motion, hover and useful clicks
+
+Task ID: 20261008-152656-fvg-engines-dashboard-ui
+Delivery status: DRAFT — DO NOT EXECUTE
+User authorization: pending dispatch approval. User requested "build the UI the both engin i want to see", then expanded it with "and implement the every UI about animation motion hover and clickable." This revised draft is not an approved task.
+Project root: E:\VideCode\vc_trade
+Source prompt after approval: `prompt/20261008-152656-fvg-engines-dashboard-ui.md`
+Report path: `report/20261008-152656-fvg-engines-dashboard-ui-report.md`
+Progress path: `report/20261008-152656-fvg-engines-dashboard-ui-progress.md`
+
+## Goal and context
+
+The two independent FVG engines already exist and are running together. Their current presentation is a narrow table inside the System automatic-execution card, plus a combined Overview sentence. The user wants to see BOTH engines clearly. Build a complete dedicated **FVG Engines** dashboard page using the existing terminal theme, with two large independent panels and a chart for each. Add a prominent Overview link/summary so this is easy to find. The user also requests animation, motion, hover and clickable interactions across the existing dashboard, not just the new page. Implement consistent interaction polish on Overview, Chart, Signals, Setups, FVG Guide, Replay, System, and the sidebar/header, preserving their existing functions.
+
+Read `report/20261008-143801-dual-timeframe-fvg-engines-report.md` and `report/20261008-143801-dual-timeframe-fvg-engines-codex-review.md`. Implementation is complete; do not re-execute that old task. At 08:26Z, MetaQuotes-Demo/XAUUSD was connected, dual execution ON via the demo default, risk $10/basket, M15 warming up 41/50 and M5 ready 125/50 with down trend. There were no dual setups or baskets in that snapshot. Read fresh runtime; do not hard-code those values or invent an FVG/order.
+
+The new UI explains existing decisions; this is not a strategy/risk/execution change. Existing explicit dual-version consent remains an open item documented in the prior report. This UI task does not authorize retrying a rejected consent/activation operation, disarming/re-arming, changing the strategy or modifying saved preferences.
+
+## Concrete screen layout
+
+Header: **FVG Engines**; XAUUSD and live/demo source; feed/scanner/quote freshness; last successful update with configured timezone. Short text states M15 and M5 operate independently and place three pending limits when their own closed-candle FVG qualifies.
+
+Shared summary strip: automatic-execution status and its actual source (explicit binding versus demo default); $10 planned risk per basket / up to $20 concurrently from effective values; slots occupied out of two; accepted baskets today out of the shared cap; cooldown scope. Do not imply nominal planned risk is a hard loss limit.
+
+Below it, two equally prominent cards, M15 on the left and M5 on the right at desktop widths; stacked M15 then M5 at mobile widths. Each card contains, in this order:
+
+1. Engine title and fixed timeframe; text status badge such as Warming up / Watching for FVG / FVG rejected / Pending limits / Filled exposure / Outcome unresolved. Keep analysis state and broker state distinct.
+2. Main next-action sentence based on real evidence, e.g. "41/50 closed M15 candles; waiting for 9 more" or "Ready; no FVG on the latest closed M5 candle". A ready indicator alone does not mean an accepted signal.
+3. Readiness progress (bounded visually at required candles, retaining actual run count in text), trend direction, ATR14, last processed candle close, next expected close, and estimated warm-up completion when available, marked conditional on no further gaps.
+4. Its OWN candlestick chart, fixed M15 for M15 and M5 for M5, with readable price/time axes, hover OHLC/timeframe/closed-versus-forming readout and local Reset view. Show corresponding stored strategy FVG bounds and A/B/C markers when a real selected record exists. Show entry/SL/TP lines only as actual stored basket levels or explicitly labelled previews. No random/sample candles in live mode.
+5. Latest decision details: direction, zone bottom/top, C-close timestamp, status, plain-language rejection/eligibility reason, and price-precision-aware values. Expandable rule detail explains trend, gap/displacement and admission from actual evidence. When only a first failed check is stored, unrecorded later checks are "not evaluated/unavailable", not passed. No new gap -> no candidate checks asserted as complete.
+6. Its basket and three legs: occupied/free slot, current basket ID/status, pending expiry, per-leg entry/SL/TP, lots, planned loss through the existing USD/USC display helper, accepted/filled/unknown state and cooldown. No journal data -> not sized/not submitted. Unknown/sending evidence must never become "no fill"; partial acceptance must show accepted count, not three accepted limits.
+7. Recent setups/baskets for that engine, with a bounded history selector/list; mark historical records explicitly. Preserve selection across refresh. An **Explain in FVG Guide** link opens the exact setup through the existing Guide/router. Historical selection never replaces current readiness or claims a current live signal.
+
+The page's charts, record selection, Reset and details are presentation-only. Keep live execution controls in System. Make the existing System summary agree with the new page rather than introducing another independent execution-state model.
+
+## Dashboard-wide motion and interaction requirements
+
+Implement an intentional shared interaction system in the existing theme, using CSS and small local JS where needed. Keep the terminal layout and data flow; no new animation framework, CDN, decorative motion that obscures prices, or unrelated page redesign.
+
+- **Buttons, links, navigation, tabs, chips used as filters, inputs and selectors:** consistent hover, focus-visible, pressed, selected, loading and disabled feedback. Use approximately 120–180ms for control feedback and 180–240ms for view/panel transitions. Hover effects apply to enabled interactive targets; preserve text contrast in both themes. Touch interactions have equivalent visible selected/pressed feedback without needing hover.
+- **View navigation and panels:** a subtle opacity/short-position transition for real view changes, drawer/menu opening and collapsible details. Animate transform/opacity where possible. Hidden views still leave layout, tab order and the accessibility tree. Transitions cannot delay the router, hide fresh errors, or replay on every background poll. Preserve navigation history, chart resizing and scroll position policies.
+- **Cards and rows:** give interactive cards/rows subtle hover/focus feedback and an obvious labelled action. Do not make static numbers or decoration look clickable. Native buttons/links provide keyboard activation and meaningful destinations. No fake no-op buttons, broad overlays covering chart pan/zoom, invalid nested interactive elements, or duplicate activation from bubbling.
+- **Concrete click destinations:** Overview M15/M5 summaries navigate to that engine panel; the new engine panel's details action expands its actual decision evidence; setup/basket rows select the corresponding engine record and expose its real chart/levels; order legs open or expand their own journal-shaped details; Explain actions open the exact record in FVG Guide. Existing Signals/Setups selections keep working with their own detail/Chart behavior. Where no record exists, show the useful empty detail state or disable a record-specific action with a clear explanation. Do not invent a destination or an order to make a click work.
+- **Charts and price evidence:** retain mouse/touch pan/zoom, OHLC hover, focusable evidence where supported, and actual record selection. A hovered/clicked zone/marker can reveal the corresponding stored record details, with an accessible list/button equivalent. Strategy zones and optional visual chart zones must remain distinguishable. Do not turn chart taps into broker actions.
+- **Data changes and loading:** first-load skeletons or loading indicators reflect actual outstanding requests. Readiness progress may transition to its new actual value. Prices, lots, risk, fill counts and accepted states update immediately to real values; do not animate through fabricated values. Do not flash/pulse every poll or rerender whole interactive panels just for visual motion. Preserve focused controls, expanded details and selections during refresh, and remove loading states on failures.
+- **Keyboard and reduced motion:** visible focus for every control, native Enter/Space activation, correct tab semantics, Escape/focus return for any custom popup/drawer, and labels/expanded state for disclosure controls. Honor `prefers-reduced-motion` in CSS and JS: remove nonessential movement, stagger and smooth scrolling while retaining immediate state changes. No autoplay decoration, parallax or repeated attention pulses.
+- **Execution controls:** preserve existing arming checkbox/confirmation, pause/resume, source/strategy selection and Replay request semantics exactly. Hover, card clicks, animation callbacks, focus and navigation never arm/disarm, submit/cancel, change risk/source or trigger a replay. Keep new engine inspection actions read-only. Do not implement the prior missing consent operation as part of this polish task.
+
+Include a concise interaction map in the final report: the meaningful click action and feedback provided on each dashboard view, plus actual keyboard/touch/reduced-motion verification. This is a functional interaction pass, not merely adding `cursor:pointer` and transitions everywhere.
+
+## Integration and data
+
+Add **FVG Engines** to the sidebar and hash router, including initial hiding, saved navigation selection, deep link, Back/Forward, active item, keyboard focus and mobile drawer behavior. Add a compact two-engine Overview summary/link so both engine statuses are visible without entering System. Preserve Chart, Guide, Signals, Setups, Replay and System behavior.
+
+Use existing `/api/state` -> `fvg.dual.engines`, `/api/fvg`, `/api/fvg/guide`, and `/api/market/bars` data where possible. Current state exposes readiness, latest evaluation, latest setup, slot and cooldown separately per engine. Filter dual records using the actual engine/version fields; legacy records are labelled separately and cannot masquerade as a new dual FVG. Legacy exposure occupying M15 remains visible as legacy.
+
+A narrowly scoped additive GET serializer/endpoint is allowed only if needed to expose already computed/stored read-only presentation evidence, such as full A/B/C timestamps, latest evaluated OHLC, precision or order levels. GET must not modify stores, recompute financial sizing through a live broker, change strategy state, reserve capacity, send/cancel orders or messages. Derive preview prices only through the existing pure geometry helpers with known metadata and matching rule versions. Unknown tick/digits or mismatched versions -> unavailable preview, never fabricated 0.01/2-digit inputs.
+
+Reuse the locally bundled chart library and theme. Independent chart instances must have their own pane state, timeframe and cleanup; reuse/refactor rendering helpers if appropriate without interfering with the existing Chart view. Poll bounded data only while needed; avoid overlapping requests and retain zoom/history selection during polling. Cancel/ignore stale responses after navigation or selection changes. M15 strategy evidence comes from complete engine M15 bars; a chart-only gap detector on arbitrary timeframes is not evidence of strategy qualification.
+
+Disconnected, stale-quote, stopped/paused-scanner, inactive/legacy strategy, empty history, missing candles/metadata and failed request states must be readable. Keep last-good evidence with a stale timestamp or hide it, rather than claiming healthy/current values after a failed refresh. Never substitute fictional fixture data for missing MT5 prices. Both engine panels remain present with honest unavailable/inactive labels.
+
+## Scope and boundaries
+
+Likely frontend files: `frontend/src/index.template.html`, `frontend/src/input.css`, `app/static/app.js`, `app/static/nav.js`, `app/static/fvg-guide.js`, a focused new `app/static/fvg-engines.js` module, chart helpers, and focused frontend tests. A small shared interaction helper is allowed when CSS/native controls alone are insufficient. Generate `app/static/index.html`/dist through the existing frontend build. Use the existing framework/library/toolchain; no CDN, global installs or unrelated redesign.
+
+Backend read-only presentation changes may use `app/web.py` and an isolated serializer with API tests if required. Strategy/execution logic is READ-ONLY: `app/fvg.py`, `app/fvg_dual.py`, `app/fvg_live.py`, `app/fvg_orders.py`, `app/fvg_execution.py`, `app/scanner.py`, configs, consent, journals and Telegram behavior. Do not change rules, thresholds, risk, cooldown/capacity or live preferences to make the UI look populated.
+
+Preserve all prior uncommitted changes. No artificial live order/removal, synthetic live signal injection, MT5 initialize/login/account switch, consent operation, test Telegram message, commit/push, helper-tool edits or global changes. Static assets need only a page refresh. A normal launcher restart is allowed ONLY if additive backend presentation changes require it, preserving preferences/consent and normal reconciliation; do not restart just for CSS/JS.
+
+## Acceptance and validation
+
+- Both engine panels and own-timeframe charts are genuinely visible together on desktop and readable when stacked around 390px. User can tell what each engine is analyzing, whether it is ready, why it has not placed an order, and whether any actual leg is pending/filled/unresolved.
+- Every dashboard view has consistent enabled-hover, keyboard-focus, pressed/selected and loading/disabled feedback on its real controls. View/panel motion works without breaking routing/chart layout; reduced motion retains all functions without nonessential movement. All new clickable affordances perform their documented useful action.
+- Data, IDs, timestamps, prices, risk and status match the existing engine/API/journal evidence. Selecting/polling one engine never displays the other engine's record/price levels in its panel. No missing or historical evidence is labelled current qualification/acceptance.
+- Focused behavior tests cover independent M15/M5 rendering, warm-up versus ready/no-gap, rejected setup, accepted pending basket, partial/unknown outcome, no metadata, stale/disconnected state, selection preservation and stale-response handling where appropriate. Extend routing/navigation tests for the new view and keyboard/click details. Verify inspection interactions never call execution, cancellation, settings or replay mutations. No superficial source/snapshot tests as a replacement for behavior.
+- Run `npm.cmd test`, `npm.cmd run build`, and syntax-check changed/new JS. If backend code changes, run focused GET safety tests plus the full backend suite with a fresh in-project basetemp; otherwise do not modify backend rules for this UI task.
+- Visually inspect desktop/mobile, light/dark, every dashboard view's hover/focus/click feedback, actual view/disclosure transitions, both engine timeframes, navigation/deep-link/Back/Forward, chart resize/hover/zoom, history selection, empty/current/rejected/pending/filled/partial/unknown and disconnected states. Test keyboard navigation, touch-sized targets and reduced-motion behavior with supported tools, distinguishing real emulation from source inspection. Use an isolated read-only mock for synthetic cases; save sanitized screenshots in `.tmp/`. Report exactly what was viewed and unavailable checks.
+- Read-only live runtime after delivery reports account context, active versions, feed/scanner freshness, execution source, risk, Telegram preference and any naturally arising records/exposure. Preserve current automatic state; do not assume there are still zero baskets.
+
+## Reply and stopping condition
+
+Codex plans/reviews; Claude implements only after approval and publication. Acknowledge at the exact progress path. Publish the matching full final report atomically from an in-project temporary file, with entry URL, features/screenshots, changed files, actual validation, runtime preservation and limitations. Stop after reporting. No self-dispatched follow-up or retry of a prior denied activation/consent action.

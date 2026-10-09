@@ -114,10 +114,11 @@ class Gap:
         return (self.bottom + self.top) / 2
 
 
-def detect_gap(a: Bar, b: Bar, c: Bar, tick: float) -> Optional[Gap]:
+def detect_gap(a: Bar, b: Bar, c: Bar, tick: float, tf=M15) -> Optional[Gap]:
+    """Three adjacent valid CLOSED candles of ONE timeframe `tf` (M15 for v1; M15 or M5 for the dual engines)."""
     if not math.isfinite(tick) or tick <= 0:
         raise ValueError("tick size must be finite and positive")
-    if any(x.tf != M15 or not x.is_valid() for x in (a, b, c)):
+    if any(x.tf != tf or not x.is_valid() for x in (a, b, c)):
         return None
     if a.close_time != b.open_time or b.close_time != c.open_time:
         return None
@@ -130,11 +131,11 @@ def detect_gap(a: Bar, b: Bar, c: Bar, tick: float) -> Optional[Gap]:
 
 
 # ---------------------------------------------------------------- 2. qualification
-def contiguous_run(bars: list[Bar]) -> list[Bar]:
-    """Valid adjacent suffix; no indicator survives a market/data break in v1."""
+def contiguous_run(bars: list[Bar], tf=M15) -> list[Bar]:
+    """Valid adjacent suffix of `tf` candles; no indicator survives a market/data break."""
     run: list[Bar] = []
     for b in bars:
-        if b.tf != M15 or not b.is_valid():
+        if b.tf != tf or not b.is_valid():
             run = []
             continue
         if run and run[-1].close_time != b.open_time:
@@ -155,8 +156,8 @@ def atr_last(bars: list[Bar], period: int) -> Optional[float]:
 
 
 def qualify(gap: Gap, history: list[Bar], cfg: FvgConfig, tick: float) -> Optional[str]:
-    """`history`: closed M15 candles ending at C (no later bars). Returns None or a rejection reason."""
-    run = contiguous_run(history)
+    """`history`: closed candles of the gap's OWN timeframe ending at C (no later bars). Returns None or a reason."""
+    run = contiguous_run(history, gap.third.tf)
     if not run or run[-1].close_time != gap.third.close_time:
         return "history_not_ending_at_c"
     if len(run) < cfg.trend_min_candles:

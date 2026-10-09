@@ -32,7 +32,7 @@ def _fmt(px: float, digits: int) -> str:
 
 def format_signal(sig: Signal) -> str:
     """Telegram signal body: exactly four emoji-labelled lines - Entry, TP, SL, RR - in that order (user requirements, 2026-10-05).
-    Prices use the symbol's digits; RR uses two decimals. Same for BUY/SELL and live/demo; the signal data is unchanged."""
+    Prices use the symbol's digits; RR uses two decimals. Same for BUY and SELL; the signal data is unchanged."""
     digits = int(sig.meta.get("symbol", {}).get("digits", 2))
     return "\n".join([
         f"📍 Entry: {_fmt(sig.entry, digits)}",
@@ -58,6 +58,10 @@ def format_fvg_basket(basket: dict) -> str:
             f"🛑 SL: {_fmt(leg['sl'], digits)}",
             f"⚖️ RR: {leg['rr']:.2f}",
         ]))
+    if basket.get("engine"):  # dual mode: ONE standalone message per basket, naming its engine, symbol and side.
+        # "planned": the alert is queued before broker evidence exists, so it never claims accepted orders
+        ident = " · ".join(x for x in (f"{basket['engine']} FVG", basket.get("symbol") or "", basket.get("direction") or "") if x)
+        blocks.insert(0, f"{ident} · 3 planned limit entries")
     return "\n\n\n".join(blocks)
 
 
@@ -136,7 +140,8 @@ class Delivery:
     def __init__(self, store: SqliteStore, settings: Settings,
                  client_factory: Optional[Callable[[str], TelegramClient]] = None,
                  clock: Callable[[], datetime] = lambda: datetime.now(UTC), *,
-                 source: str = "demo", symbol: str = "", optin_path: Optional[Path] = None):
+                 source: str, symbol: str = "", optin_path: Optional[Path] = None):
+        # source: always "mt5" in the app (MT5-only); tests pass a non-MT5 label, which never touches the live opt-in
         self.store, self.settings, self.clock = store, settings, clock
         self._factory = client_factory or (lambda token: TelegramClient(token))
         self._client: Optional[TelegramClient] = None
@@ -169,7 +174,7 @@ class Delivery:
             self.store.add_event("delivery", f"external delivery restored: {self.optin_note} (new signals only)")
             return
         if self.source != "mt5":
-            return  # the live opt-in is untouched while a demo session runs; it is re-checked when live starts
+            return  # a non-MT5 source (tests) never touches the saved live opt-in
         changed = [k for k in current if (saved.get("binding") or {}).get(k) != current[k]]
         self._drop_optin(f"opt-in invalidated because {', '.join(changed) or 'it was unreadable'} changed; re-enable to continue")
 

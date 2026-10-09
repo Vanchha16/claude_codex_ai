@@ -59,7 +59,7 @@ def settle(sig: Signal, status: str, at: datetime, price: Optional[float], note:
 
 def track_live(sig: Signal, new_bars: Iterable[Bar], quote: Optional[Quote], now: datetime, cfg: StrategyConfig,
                quote_fresh: bool) -> bool:
-    """Advance one active live/demo signal. Returns True if the signal changed state."""
+    """Advance one active live signal. Returns True if the signal changed state."""
     if sig.outcome_status != "active":
         return False
     hours = expiry_hours(sig, cfg)
@@ -78,7 +78,7 @@ def track_live(sig: Signal, new_bars: Iterable[Bar], quote: Optional[Quote], now
         if hit:
             note = f"{hit.upper()} touched in M5 bar {bar.open_time:%H:%M} UTC"
             if sig.direction != BUY:
-                note += " (ESTIMATE: Ask approximated as Bid bar + entry spread; demo/no-tick feed)"
+                note += " (ESTIMATE: Ask approximated as Bid bar + entry spread; no-tick feed)"
             settle(sig, hit, bar.close_time, sig.tp if hit == "tp" else sig.sl, note)
             return True
     if quote is not None and quote_fresh and sig.quote_time <= quote.time <= deadline:

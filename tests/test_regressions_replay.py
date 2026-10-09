@@ -6,7 +6,7 @@ import pytest
 from app.config import StrategyConfig
 from app.models import H1, M5, Bar, Quote, aggregate
 from app.replay import Costs, replay
-from app.scenarios import buy_setup, sell_setup
+from tests.scenarios import buy_setup, sell_setup
 
 from .helpers import CONFIRM_CLOSE, META, T0, idx_at
 from .test_replay import _pad

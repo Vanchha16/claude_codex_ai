@@ -8,7 +8,7 @@ import vm from "node:vm";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = readFileSync(path.join(here, "../../app/static/nav.js"), "utf8");
-const IDS = ["overview", "chart-section", "signals-section", "setups-section", "replay-section", "system-section"];
+const IDS = ["overview", "chart-section", "signals-section", "setups-section", "engines-section", "replay-section", "system-section"];
 
 /** Minimal browser stand-in: elements with `hidden`, a scroll container, localStorage, location.hash and history. */
 function load({ hash = "", stored = null, blockedStorage = false } = {}) {
@@ -102,4 +102,28 @@ test("view-change listeners fire once per real change", () => {
   t.nav.go("chart");
   t.nav.go("signals");
   assert.deepEqual(seen, ["chart", "signals"]);
+});
+
+test("FVG Engines has its own deep link, saved selection and Back/Forward entry", () => {
+  const t = load({ hash: "#engines-section" });
+  assert.deepEqual(t.visible(), ["engines-section"]);
+  assert.equal(t.store.get("vcSection"), "engines");
+  t.nav.go("overview");
+  t.nav.go("engines");
+  t.back();
+  assert.deepEqual(t.visible(), ["overview"]);
+  t.forward();
+  assert.deepEqual(t.visible(), ["engines-section"]);
+  assert.deepEqual(load({ stored: "engines" }).visible(), ["engines-section"]);
+});
+
+test("only real view changes get the enter transition class (never the first paint)", () => {
+  const t = load();
+  const classes = new Set();
+  t.els["engines-section"].classList = { add: (c) => classes.add(c), remove: (c) => classes.delete(c) };
+  t.els["engines-section"].addEventListener = () => {};
+  t.nav.go("engines");
+  assert.ok(classes.has("vc-entering"));
+  const first = load({ hash: "#engines-section" });
+  assert.equal(first.els["engines-section"].classList, undefined); // stub has none: apply() never needed it on load
 });

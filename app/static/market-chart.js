@@ -1,6 +1,6 @@
 "use strict";
 // VC Signal market chart: TradingView Lightweight Charts (Apache-2.0, https://www.tradingview.com/) fed by
-// VC Signal's own /api/market/bars (the local MT5 terminal, or the fictional demo fixture). Display only:
+// VC Signal's own /api/market/bars (the local MT5 terminal). Display only:
 // chart timeframes, the forming candle, EMAs and tick volume never reach the H1/M5 strategy engine.
 (function (root) {
   const LWC = root.LightweightCharts;
@@ -315,7 +315,7 @@
     }
 
     _liveText(data) {
-      const src = data.source === "demo" ? "DEMO fixture (fictional)" : "MT5 terminal";
+      const src = "MT5 terminal";
       return `${data.symbol || "?"} · ${TF_LABEL[this.tf]} · ${src} · ${this.closed.length} closed candles` +
         (this.forming ? " · last candle FORMING (display only; analysis uses closed candles)" : "");
     }
@@ -424,7 +424,7 @@
       const from = t(c.a_open) - 3600, to = t(rec.window.end);
       try { this.chart.timeScale().setVisibleRange({ from, to }); } catch (e) { this.chart.timeScale().fitContent(); }
       this._status("setup", `${c.direction} setup · A ${root.VCTime.format(c.a_open, this.tz(), false)} · ${c.status}` +
-        (s ? ` · ${s.id}` : "") + (rec.mode === "demo" ? " · FICTIONAL DEMO PRICES" : "") + " · press “Live” to return");
+        (s ? ` · ${s.id}` : "") + " · press “Live” to return");
     }
 
     returnLive() { return this.load(this.tf); }

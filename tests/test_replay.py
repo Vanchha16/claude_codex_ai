@@ -2,10 +2,11 @@ from datetime import timedelta
 
 import pytest
 
-from app.config import DEMO_FIXTURE, StrategyConfig
+from app.config import StrategyConfig
 from app.models import M5, Bar, Quote
-from app.replay import Costs, load_fixture, replay
-from app.scenarios import buy_setup, sell_setup
+from app.replay import Costs, replay
+from tests.fixture_feed import load_fixture
+from tests.scenarios import buy_setup, sell_setup
 
 from .helpers import CONFIRM_CLOSE, META, T0, idx_at, with_bar
 
@@ -80,7 +81,7 @@ def test_no_fill_without_next_observation():
 
 
 def test_holdout_is_chronological_and_isolated():
-    m5, meta, _ = load_fixture(DEMO_FIXTURE)
+    m5, meta, _ = load_fixture()
     full = replay(m5, meta, CFG, OHLC, holdout_fraction=0.30)
     split = full.split_at
     dev_only = [b for b in m5 if b.close_time.isoformat().replace("+00:00", "Z") <= split]
@@ -92,8 +93,8 @@ def test_holdout_is_chronological_and_isolated():
     assert all(s["confirm_close"] >= split for s in full.signals if s["segment"] == "holdout")
 
 
-def test_demo_fixture_expected_scenarios():
-    m5, meta, raw = load_fixture(DEMO_FIXTURE)
+def test_test_fixture_expected_scenarios():
+    m5, meta, raw = load_fixture()
     assert raw["meta"]["fictional"] is True
     r = replay(m5, meta, CFG, OHLC)
     outcomes = [(s["direction"], s["outcome"]) for s in r.signals]

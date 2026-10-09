@@ -70,8 +70,14 @@ def plan_id_for(setup_key: str) -> str:
     return hashlib.sha256(setup_key.encode()).hexdigest()[:16]
 
 
-def leg_comment(plan_id: str, number: int) -> str:
-    return f"FVG-{plan_id}-L{number}"  # <= 31 characters (MT5 comment limit)
+def leg_comment(plan_id: str, number: int, tag: str = "FVG") -> str:
+    """tag: "FVG" for legacy v1 baskets, "FVG15"/"FVG5" for the dual M15/M5 engines (identifies the engine at the
+    broker). "FVG15-" + 16 hex + "-L3" = 25 <= 31 characters (MT5 comment limit)."""
+    return f"{tag}-{plan_id}-L{number}"
+
+
+def comment_prefix(plan_id: str, tag: str = "FVG") -> str:
+    return f"{tag}-{plan_id}-"
 
 
 # ---------------------------------------------------------------- policy, risk preference and opt-in
@@ -123,11 +129,11 @@ class ExecutionOptIn:
         saved = self.load()
         return bool(saved and saved.get("binding") == binding)
 
-    def arm(self, binding: dict, at: datetime) -> None:
+    def arm(self, binding: dict, at: datetime, approval: Optional[str] = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".fvg_optin.", suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"binding": binding, "armed_at": at.isoformat()}, fh)
+            json.dump({"binding": binding, "armed_at": at.isoformat()} | ({"approval": approval} if approval else {}), fh)
         os.replace(tmp, self.path)
 
     def disarm(self) -> None:
@@ -189,7 +195,14 @@ class MT5FvgExecutor:
     def mt5(self):
         return self.module_fn()
 
-    def _context(self, symbol: str, now: datetime):
+    @staticmethod
+    def _foreign(items, allowed_prefixes) -> list:
+        """Orders/positions that are NOT this engine family's own exposure of another still-open basket. With no allowed
+        prefixes (legacy single-basket mode) everything on the symbol counts, exactly as before."""
+        return [x for x in items if not (allowed_prefixes and getattr(x, "magic", None) == MAGIC
+                                         and str(getattr(x, "comment", "") or "").startswith(tuple(allowed_prefixes)))]
+
+    def _context(self, symbol: str, now: datetime, allowed_prefixes: tuple = ()):
         mt5 = self.mt5
         if mt5 is None:
             raise ValueError("MT5 is not connected")
@@ -220,8 +233,9 @@ class MT5FvgExecutor:
         orders, positions = mt5.orders_get(symbol=symbol), mt5.positions_get(symbol=symbol)
         if orders is None or positions is None:
             raise ValueError("cannot verify existing symbol exposure")
-        if orders or positions:
-            raise ValueError("existing orders or positions on the symbol block another FVG basket")
+        if self._foreign(orders, allowed_prefixes) or self._foreign(positions, allowed_prefixes):
+            raise ValueError("existing orders or positions on the symbol block another FVG basket"
+                             + (" (only the other engine's own open basket may coexist)" if allowed_prefixes else ""))
         if not math.isfinite(account.equity) or account.equity <= 0:
             raise ValueError("invalid account equity")
         return account, info, tick
@@ -280,10 +294,13 @@ class MT5FvgExecutor:
         return None
 
     def submit(self, plan_id: str, gap: Gap, meta: SymbolMeta, now: datetime, expires: datetime, *,
-               stop_spread_margin_ticks: int = 1, eligibility: Optional[dict] = None) -> dict:
+               stop_spread_margin_ticks: int = 1, eligibility: Optional[dict] = None, comment_tag: str = "FVG",
+               allowed_prefixes: tuple = (), engine: Optional[str] = None) -> dict:
         """Automatic submission of one basket. Never retried after a journal row exists (idempotent).
         eligibility = {"confirm_close", "setup_expires", "max_age_seconds"}: checked with the current clock before
-        preflight, after preflight and immediately before EVERY send; stale context sends nothing new."""
+        preflight, after preflight and immediately before EVERY send; stale context sends nothing new.
+        Dual engines: comment_tag "FVG15"/"FVG5"; allowed_prefixes = comment prefixes of the OTHER engine's still-open
+        baskets on this account (their own orders/positions may coexist; anything else on the symbol still blocks)."""
         if not self.policy.enabled:
             return {"state": "disabled", "reason": "automatic execution is OFF; no orders submitted"}
         if self.policy.risk_usd is None:
@@ -302,7 +319,7 @@ class MT5FvgExecutor:
             why = self._ineligible(eligibility, clock_now(), expires)
             if why:
                 raise ValueError(f"no longer eligible: {why}")
-            account, info, tick = self._context(meta.name, clock_now())
+            account, info, tick = self._context(meta.name, clock_now(), allowed_prefixes)
             mt5 = self.mt5
             cash = account_cash_risk(self.policy.risk_usd, getattr(account, "currency", ""))
 
@@ -329,7 +346,7 @@ class MT5FvgExecutor:
                 request = {"action": mt5.TRADE_ACTION_PENDING, "symbol": meta.name, "volume": leg.volume,
                            "type": mt5.ORDER_TYPE_BUY_LIMIT if buy else mt5.ORDER_TYPE_SELL_LIMIT,
                            "price": leg.entry, "sl": leg.sl, "tp": leg.tp, "magic": MAGIC,
-                           "comment": leg_comment(plan_id, leg.number), "type_filling": filling,
+                           "comment": leg_comment(plan_id, leg.number, comment_tag), "type_filling": filling,
                            "type_time": mt5.ORDER_TIME_SPECIFIED,
                            "expiration": int(self.timebase_fn().to_broker(expires).timestamp())}  # broker time base
                 check = mt5.order_check(request)
@@ -343,7 +360,7 @@ class MT5FvgExecutor:
             if not math.isfinite(account.margin_free) or margin > account.margin_free:
                 raise ValueError("the three orders exceed available margin")
             # Immediately before the first send: re-read account/exposure AND re-validate the limits on the fresh quote.
-            _, info2, tick2 = self._context(meta.name, clock_now())
+            _, info2, tick2 = self._context(meta.name, clock_now(), allowed_prefixes)
             self._check_distances(plan, info2, tick2, broker_meta.tick_size)
             self._check_spread_room(plan, tick2, stop_spread_margin_ticks, broker_meta.tick_size)
             why = self._ineligible(eligibility, clock_now(), expires)  # a slow preflight can age the confirmation
@@ -355,8 +372,9 @@ class MT5FvgExecutor:
                        "expires": expires.isoformat(), "created_at": now.isoformat(),
                        "time_base": self.timebase_fn().to_dict(), "risk_usd": self.policy.risk_usd,
                        "cash_risk_account_ccy": cash, "nominal_planned_loss": sum(p.planned_loss for p in plan),
-                       "legs": [{**asdict(p), "state": "prepared", "ticket": None, "comment": leg_comment(plan_id, p.number)}
-                                for p in plan]}
+                       "comment_prefix": comment_prefix(plan_id, comment_tag), "engine": engine,
+                       "legs": [{**asdict(p), "state": "prepared", "ticket": None,
+                                 "comment": leg_comment(plan_id, p.number, comment_tag)} for p in plan]}
             if not self.journal.create(plan_id, payload):  # durable reservation before any send
                 return self.journal.get(plan_id)
             accepted = {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED}
@@ -495,7 +513,7 @@ class MT5FvgExecutor:
             leg["state"] = ("closed_tp" if reasons == {mt5.DEAL_REASON_TP} else
                             "closed_sl" if reasons == {mt5.DEAL_REASON_SL} else "closed_other")
         legs = payload["legs"]
-        prefix = f"FVG-{plan_id}-"
+        prefix = payload.get("comment_prefix") or comment_prefix(plan_id)  # legacy journals: "FVG-<plan>-"
         plan_positions = [p for p in positions if getattr(p, "magic", None) == MAGIC
                           and str(getattr(p, "comment", "") or "").startswith(prefix)]
         leg_positions = {pid for l in legs for pid in (l.get("position_id") if isinstance(l.get("position_id"), list)

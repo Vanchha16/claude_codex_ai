@@ -10,7 +10,7 @@ from ..models import Bar, Quote, SymbolMeta
 @dataclass
 class FeedStatus:
     ok: bool
-    state: str  # connected | demo | demo_finished | not_configured | disconnected | symbol_missing | error
+    state: str  # connected | not_configured | disconnected | symbol_missing | symbol_selection_required | error
     message: str
     details: dict = field(default_factory=dict)
 
@@ -19,7 +19,7 @@ class FeedStatus:
 
 
 class Feed(Protocol):
-    mode: str  # "demo" or "mt5"
+    mode: str  # "mt5" (the only production source)
 
     def connect(self) -> FeedStatus: ...
     def status(self) -> FeedStatus: ...

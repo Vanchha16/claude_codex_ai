@@ -1,4 +1,4 @@
-"""Build the deterministic FICTIONAL demo fixture: python -m app.demo_fixture
+"""Build the deterministic FICTIONAL TEST fixture (tests only): python -m tests.fixture_gen
 
 Scenarios (in order), separated by quiet filler hours whose identical ranges never sweep each other:
   1 valid BUY -> runs to TP          2 valid SELL -> runs to TP
@@ -13,9 +13,9 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
-from .config import DEMO_FIXTURE
-from .models import H1, M5, UTC, Bar, iso
-from .scenarios import _A, _B, _CONFIRM, _P, _RUN, bars_from, mirror
+from app.models import H1, M5, UTC, Bar, iso
+from tests.fixture_feed import FIXTURE as DEMO_FIXTURE
+from tests.scenarios import _A, _B, _CONFIRM, _P, _RUN, bars_from, mirror
 
 START = datetime(2030, 1, 7, 0, 0, tzinfo=UTC)  # deliberately in the future: obviously not historical market data
 TICK = 0.01

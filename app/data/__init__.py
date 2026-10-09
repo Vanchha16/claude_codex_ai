@@ -1,1 +1,1 @@
-"""Interchangeable market-data feeds: FICTIONAL demo fixture and read-only MetaTrader 5."""
+"""Market data: the read-only MetaTrader 5 feed (VC Signal is MT5-only)."""

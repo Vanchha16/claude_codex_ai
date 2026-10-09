@@ -5,7 +5,7 @@ import pytest
 
 from app.config import ConfigError, StrategyConfig
 from app.models import H1, M5, Bar, Quote, aggregate, round_down_to_tick, round_up_to_tick
-from app.scenarios import BUY_LEVEL, buy_setup, mirror, sell_setup
+from tests.scenarios import BUY_LEVEL, buy_setup, mirror, sell_setup
 from app.strategy import BUY, SELL, Setup, build_entry, confirm_step, evaluate_range, find_pivots, select_structure
 
 from .helpers import A_OPEN, B_CLOSE, B_OPEN, CFG, CONFIRM_CLOSE, META, T0, candidate_for_a, drive, idx_at, quote_at_close, with_bar

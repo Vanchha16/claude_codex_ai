@@ -82,6 +82,19 @@ class FvgStore:
                                    "ORDER BY c_close", (symbol, version)).fetchall()
         return [_load_setup(json.loads(r[0])) for r in rows]
 
+    def open_setups(self, symbol: str) -> list[FvgSetup]:
+        """Waiting (pending/retested) setups of ANY version for the symbol (used to retire legacy v1 setups)."""
+        with self._lock:
+            rows = self.db.execute("SELECT payload FROM fvg_setups WHERE symbol=? AND status IN ('pending','retested')",
+                                   (symbol,)).fetchall()
+        return [_load_setup(json.loads(r[0])) for r in rows]
+
+    def setups_for_version(self, symbol: str, version: str, limit: int = 50) -> list[FvgSetup]:
+        with self._lock:
+            rows = self.db.execute("SELECT payload FROM fvg_setups WHERE symbol=? AND version=? ORDER BY c_close DESC LIMIT ?",
+                                   (symbol, version, limit)).fetchall()
+        return [_load_setup(json.loads(r[0])) for r in rows]
+
     def list_setups(self, limit: int = 200) -> list[FvgSetup]:
         with self._lock:
             rows = self.db.execute("SELECT payload FROM fvg_setups ORDER BY c_close DESC LIMIT ?", (limit,)).fetchall()
@@ -96,6 +109,13 @@ class FvgStore:
     def update_basket(self, b: dict) -> None:
         with self._lock:
             self.db.execute("UPDATE fvg_baskets SET status=?, payload=? WHERE id=?", (b["status"], json.dumps(b), b["id"]))
+
+    def basket_for_setup(self, setup_key: str) -> Optional[dict]:
+        """Read-only: the basket created from this exact setup (stored relationship), independent of any recency window."""
+        with self._lock:
+            row = self.db.execute("SELECT payload FROM fvg_baskets WHERE json_extract(payload, '$.setup_key') = ? "
+                                  "ORDER BY placed_at DESC LIMIT 1", (setup_key,)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def baskets(self, symbol: Optional[str] = None, limit: int = 500) -> list[dict]:
         q, args = "SELECT payload FROM fvg_baskets", []

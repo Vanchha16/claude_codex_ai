@@ -1,4 +1,4 @@
-"""Hand-specified FICTIONAL M5 price paths used by tests and the demo fixture.
+"""Hand-specified FICTIONAL M5 price paths used by tests and the test fixture (TEST-ONLY; never imported by app/).
 
 `buy_setup` is a complete CRT-SMC-v1 BUY: hour P (filler), hour A (range 2400-2420 with a confirmed swing
 high at 2405 inside it), hour B (sweeps A's low to 2399.00 and closes back inside at 2403.00), then M5 bars
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .models import M5, Bar
+from app.models import M5, Bar
 
 # (open, high, low, close) per M5 bar
 _P = [(2414.0, 2415.0, 2413.0, 2414.5), (2414.5, 2415.5, 2414.0, 2415.0), (2415.0, 2415.8, 2414.2, 2414.6),

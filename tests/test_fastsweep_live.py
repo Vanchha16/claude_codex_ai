@@ -21,6 +21,7 @@ from app.scanner import Scanner
 from app.store import SqliteStore
 
 from .test_fastsweep import M15, block, m15
+from tests.conftest import fixture_factory
 
 META = SymbolMeta("TESTGOLD", 0.01, 0.01, 2, "test")
 META3 = SymbolMeta("TESTGOLD", 0.001, 0.001, 3, "test")
@@ -318,7 +319,7 @@ def make_scanner(tmp_path, bars, now, calls):
         calls.append(json.loads(request.content))
         return httpx.Response(200, json={"ok": True, "result": {"message_id": len(calls)}})
     feed = FakeFeed(bars, now)
-    delivery = Delivery(store, settings, clock=feed.now,
+    delivery = Delivery(store, settings, clock=feed.now, source="test",
                         client_factory=lambda t: TelegramClient(t, transport=httpx.MockTransport(handler)))
     active = ActiveStrategy("fastsweep", "rr2", RR2)
     return Scanner(settings, StrategyConfig(), feed, store, delivery, active=active), feed, store, delivery
@@ -396,7 +397,7 @@ def test_scan_at_the_exact_close_waits_for_the_first_quote_after_it(tmp_path):
 def test_api_reports_the_active_strategy_and_per_record_identity(tmp_path):
     from fastapi.testclient import TestClient
     from app.web import create_app
-    app = create_app(Settings(port=8000, demo_speed=600), state_dir=tmp_path, extra_hosts=("testserver",),
+    app = create_app(Settings(port=8000), feed_factory=fixture_factory, state_dir=tmp_path, extra_hosts=("testserver",),
                      active_strategy_loader=lambda: parse_active_strategy({"strategy": "fastsweep", "profile": "rr2"}))
     with TestClient(app) as c:
         s = c.get("/api/state").json()

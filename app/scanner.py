@@ -23,6 +23,7 @@ from .config import Settings, StrategyConfig
 from .delivery import Delivery
 from .engine import Engine
 from .fastsweep_live import FastSweepEngine, retire_foreign_pending
+from .fvg_dual import DualFvgLiveEngine
 from .fvg_live import FvgLiveEngine
 from .models import H1, M5, contiguous, iso, parse_iso
 from .outcomes import track_live, track_measured
@@ -40,7 +41,7 @@ M5_WINDOW = {"crt": 300, "fastsweep": 600, "fvg": 600}  # FastSweep: >= 50 conti
 class Scanner:
     def __init__(self, settings: Settings, cfg: StrategyConfig, feed, store: SqliteStore, delivery: Delivery,
                  active: Optional[ActiveStrategy] = None, *, fvg_store=None, fvg_executor_fn=None, fvg_maintenance_fn=None,
-                 fvg_account_fn=None):
+                 fvg_account_fn=None, fvg_risk_fn=None):
         self.settings, self.cfg, self.feed, self.store, self.delivery = settings, cfg, feed, store, delivery
         self.active = active or ActiveStrategy("crt")  # CRT-SMC-v1 unless another strategy is explicitly selected
         # FVG only: its own record store and the (default OFF) execution hooks supplied by the workstation
@@ -48,6 +49,7 @@ class Scanner:
         self.fvg_executor_fn = fvg_executor_fn or (lambda: (None, "automatic execution OFF"))
         self.fvg_maintenance_fn = fvg_maintenance_fn or (lambda: None)
         self.fvg_account_fn = fvg_account_fn or (lambda: None)
+        self.fvg_risk_fn = fvg_risk_fn or (lambda: None)  # configured USD budget per basket (dual concurrency check)
         self.engine = None  # Engine (CRT) or FastSweepEngine
         self.paused = store.get_meta("paused", "0") == "1"
         self._stop = threading.Event()
@@ -115,25 +117,11 @@ class Scanner:
                              "resumed while the feed is disconnected; a new session starts when it recovers")
 
     def _run(self) -> None:
-        demo = self.feed.mode == "demo"
         while not self._stop.is_set():
             started = time.monotonic()
             try:
-                if demo:
-                    # simulated clock: several 5-simulated-second scans per real tick keep live semantics intact
-                    tick_real = 0.25
-                    steps = max(1, int(round(self.settings.demo_speed * tick_real / 5)))
-                    for _ in range(steps):
-                        if self.feed.finished:
-                            break
-                        self.feed.advance(5)
-                        self.scan_once()
-                    if self.feed.finished:
-                        self.scan_once()
-                    wait = tick_real
-                else:
-                    self.scan_once()
-                    wait = self.settings.scan_interval_seconds
+                self.scan_once()
+                wait = self.settings.scan_interval_seconds
                 self.state["error"] = None
             except Exception as exc:  # keep the worker alive; surface the error in the UI
                 self.state["error"] = self.settings.redact(f"{type(exc).__name__}: {exc}")
@@ -227,7 +215,7 @@ class Scanner:
             if getattr(self.feed, "supports_ticks", False):
                 observations, gap = self._observed_quotes(sig, quote if fresh else None, now)
                 changed = track_measured(sig, observations, now, self.cfg, gap)
-            else:  # demo / no-tick feeds: bar + per-scan quote ESTIMATES, labelled as such
+            else:  # feeds without tick history: bar + per-scan quote ESTIMATES, labelled as such
                 new_bars = [b for b in m5 if not sig.last_checked or b.close_time > sig.last_checked]
                 changed = track_live(sig, new_bars, quote, now, self.cfg, fresh)
                 if not changed and new_bars:
@@ -327,7 +315,16 @@ class Scanner:
     def _make_engine(self, meta, now: datetime):
         """Build the selected strategy's engine; pending setups of any other strategy/profile are retired, never
         evaluated with these rules. Existing history and signals are untouched."""
-        if self.active.is_fvg:
+        if self.active.is_fvg_dual:
+            if self.fvg_store is None:
+                raise RuntimeError("FVG selected but no FVG record store was provided")
+            engine = DualFvgLiveEngine(self.active.fvg_dual, meta, self.fvg_store, self.store, self.feed.mode,
+                                       alert_fn=lambda b: self.delivery.on_fvg_basket(b),
+                                       executor_fn=self.fvg_executor_fn, maintenance_fn=self.fvg_maintenance_fn,
+                                       account_fn=self.fvg_account_fn, risk_fn=self.fvg_risk_fn)
+            engine.retire_legacy_setups(now)
+            version = engine.version
+        elif self.active.is_fvg:
             if self.fvg_store is None:
                 raise RuntimeError("FVG selected but no FVG record store was provided")
             engine = FvgLiveEngine(self.active.fvg, meta, self.fvg_store, self.store, self.feed.mode,
@@ -387,8 +384,32 @@ class Scanner:
         return {"state": "waiting for the next closed M15 pair", "readiness": r,
                 "detail": f"Trend {trend}. Next M15 close {nxt}."}
 
+    def _fvg_dual_state(self) -> dict:
+        eng = self.engine
+        now = self.feed.now()
+        summary = eng.state_summary(now)
+        parts = []
+        for e, x in summary["engines"].items():
+            r = x.get("readiness") or {}
+            if x["slot"]:
+                parts.append(f"{e}: basket {x['slot']['basket']} ({x['slot']['status']})")
+            elif r and not r.get("ready"):
+                parts.append(f"{e}: warm-up {r.get('run')}/{r.get('required')}")
+            elif x.get("cooldown_until"):
+                parts.append(f"{e}: cooldown until {x['cooldown_until']}")
+            else:
+                parts.append(f"{e}: waiting for a qualified FVG (trend {r.get('trend') or 'n/a'}, next close {r.get('next_close')})")
+        busy = [e for e, x in summary["engines"].items() if x["slot"]]
+        state = (f"{' + '.join(busy)} basket open" if busy else
+                 "warm-up" if all(not (x.get("readiness") or {}).get("ready") for x in summary["engines"].values()) else
+                 "waiting for a qualified FVG")
+        return {"state": state, "readiness": eng.readiness, "dual": summary,
+                "detail": "; ".join(parts) + f". Baskets today {summary['daily']['accepted']}/{summary['daily']['cap']} (total)."}
+
     def _fvg_state(self) -> dict:
         eng = self.engine
+        if getattr(eng, "dual", False):
+            return self._fvg_dual_state()
         r = eng.readiness
         now = self.feed.now()
         from .fvg_live import basket_is_open

@@ -22,6 +22,7 @@ from app.store import SqliteStore
 
 from .test_fastsweep import m15
 from .test_fvg_execution import Broker
+from tests.conftest import fixture_factory
 
 META = SymbolMeta("TEST", 0.01, 0.01, 2, "test")
 CFG = PROFILES["rr2"]
@@ -293,7 +294,7 @@ def test_outbox_dedup_and_three_four_line_blocks(tmp_path):
     store = SqliteStore(tmp_path / "o.sqlite")
     calls = []
     settings = Settings(telegram_bot_token="1:x", telegram_test_chat_id="-1")
-    d = Delivery(store, settings, client_factory=lambda t: TelegramClient(t, transport=httpx.MockTransport(
+    d = Delivery(store, settings, source="test", client_factory=lambda t: TelegramClient(t, transport=httpx.MockTransport(
         lambda r: calls.append(r) or httpx.Response(200, json={"ok": True, "result": {"message_id": 1}}))))
     d.set_enabled(True)
     basket = {"id": "FVG-1", "placed_at": iso(datetime.now(UTC)), "meta": {"digits": 3},
@@ -357,7 +358,7 @@ def scanner(tmp_path, bars, now, armed):
     def executor_fn():
         broker.set_quote(feed.now(), 120.2, 120.2 + feed.spread)
         return (MT5FvgExecutor(lambda: broker, journal, pol), "ON") if armed else (None, "automatic execution OFF")
-    sc = Scanner(settings, StrategyConfig(), feed, store, Delivery(store, settings, clock=feed.now),
+    sc = Scanner(settings, StrategyConfig(), feed, store, Delivery(store, settings, clock=feed.now, source="test"),
                  active=parse_active_strategy({"strategy": "fvg", "profile": "rr2"}), fvg_store=fstore,
                  fvg_executor_fn=executor_fn,
                  fvg_maintenance_fn=lambda: MT5FvgExecutor(lambda: broker, journal, ExecutionPolicy()))
@@ -392,7 +393,7 @@ def test_api_reports_fvg_inactive_and_refuses_arming(tmp_path):
     from fastapi.testclient import TestClient
     from app.active_strategy import ActiveStrategy
     from app.web import create_app
-    app = create_app(Settings(port=8000, demo_speed=600), state_dir=tmp_path, extra_hosts=("testserver",),
+    app = create_app(Settings(port=8000), feed_factory=fixture_factory, state_dir=tmp_path, extra_hosts=("testserver",),
                      active_strategy_loader=lambda: ActiveStrategy("crt"))
     with TestClient(app) as c:
         token = app.state.token
@@ -403,12 +404,12 @@ def test_api_reports_fvg_inactive_and_refuses_arming(tmp_path):
         assert c.get("/api/fvg").json()["baskets"] == []
         trading = c.get("/api/state").json()["trading"]
         assert trading.startswith("disabled:") and "no orders are sent" in trading and "FVG is not the active strategy" in trading
-    app2 = create_app(Settings(port=8000, demo_speed=600), state_dir=tmp_path / "fvg", extra_hosts=("testserver",),
+    app2 = create_app(Settings(port=8000), feed_factory=fixture_factory, state_dir=tmp_path / "fvg", extra_hosts=("testserver",),
                       active_strategy_loader=lambda: parse_active_strategy({"strategy": "fvg", "profile": "rr2"}))
     with TestClient(app2) as c:
         s = c.get("/api/state").json()
         assert s["active_strategy"]["kind"] == "fvg" and s["fvg"]["auto_execution"] == "OFF"
-        assert s["fvg"]["reason"] == "automatic execution needs the live MT5 source"
+        assert s["fvg"]["reason"] == "MT5 account unavailable"  # MT5-only: the test feed has no account behind it
         assert s["trading"].startswith("disabled: FVG automatic execution is OFF") and "no orders are sent" in s["trading"]
         r = c.post("/api/fvg/execution", json={"enabled": True, "confirm": True}, headers={"X-Session-Token": app2.state.token})
         assert r.status_code == 400
@@ -493,7 +494,7 @@ def test_replay_artifacts_are_read_from_the_workstation_state_dir_only(tmp_path)
     from fastapi.testclient import TestClient
     from app.active_strategy import ActiveStrategy
     from app.web import create_app
-    app = create_app(Settings(port=8000, demo_speed=600), state_dir=tmp_path, extra_hosts=("testserver",),
+    app = create_app(Settings(port=8000), feed_factory=fixture_factory, state_dir=tmp_path, extra_hosts=("testserver",),
                      active_strategy_loader=lambda: ActiveStrategy("crt"))
     with TestClient(app) as c:
         # the real project state dir may hold saved live replays; a test workstation never sees them

@@ -74,7 +74,7 @@ class SymbolMeta:
     tick_size: float
     point: float
     digits: int
-    source: str  # "demo" (fictional fixture) or "mt5"
+    source: str  # "mt5" (live terminal) or "csv" (user-supplied replay history)
 
     def to_dict(self) -> dict:
         return {"name": self.name, "tick_size": self.tick_size, "point": self.point, "digits": self.digits, "source": self.source}

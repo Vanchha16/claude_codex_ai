@@ -1,4 +1,5 @@
-"""Which strategy the live scanner runs: CRT-SMC-v1 (default, rollback) or FastSweep-M15-M5-v1 with a fixed profile.
+"""Which strategy the live scanner runs: CRT-SMC-v1 (default, rollback), FastSweep-M15-M5-v1, FVG-Trend-M15-M5-v1
+("fvg"/"rr2", kept as rollback) or the independent M15 + M5 FVG engines ("fvg"/"dual").
 
 Persisted in config/active_strategy.json, e.g. {"strategy": "fastsweep", "profile": "rr2"} or {"strategy": "crt"}.
 No file means CRT (the original behaviour). Unknown strategies/profiles or extra keys fail clearly at startup.
@@ -19,6 +20,7 @@ from typing import Optional
 from .config import PROJECT_ROOT
 from .fastsweep import PROFILES, STRATEGY, FastSweepConfig
 from .fvg import PROFILES as FVG_PROFILES, STRATEGY as FVG_STRATEGY, FvgConfig
+from .fvg_dual import DUAL_PROFILE, DUAL_STRATEGY, DualFvgConfig
 
 ACTIVE_STRATEGY_FILE = PROJECT_ROOT / "config" / "active_strategy.json"
 KINDS = ("crt", "fastsweep", "fvg")
@@ -37,9 +39,21 @@ def is_fastsweep_version(version: Optional[str]) -> bool:
 @dataclass(frozen=True)
 class ActiveStrategy:
     kind: str                                   # "crt" | "fastsweep" | "fvg"
-    profile: Optional[str] = None               # "rr1" | "rr2" for fastsweep, "rr2" for fvg
+    profile: Optional[str] = None               # "rr1" | "rr2" for fastsweep; "rr2" (legacy v1) or "dual" for fvg
     fastsweep: Optional[FastSweepConfig] = None
-    fvg: Optional[FvgConfig] = None
+    fvg: Optional[FvgConfig] = None             # FVG rule parameters (v1 profile, or the dual engines' shared rules)
+    fvg_dual: Optional[DualFvgConfig] = None    # set only for the independent M15 + M5 engines
+
+    @property
+    def is_fvg_dual(self) -> bool:
+        return self.kind == "fvg" and self.fvg_dual is not None
+
+    @property
+    def fvg_version(self) -> Optional[str]:
+        """The version that execution consent binds to: the dual mode's own version, or the v1 profile's."""
+        if not self.is_fvg:
+            return None
+        return self.fvg_dual.version if self.fvg_dual is not None else self.fvg.version
 
     @property
     def is_fvg(self) -> bool:
@@ -50,6 +64,25 @@ class ActiveStrategy:
         return self.kind == "fastsweep"
 
     def describe(self, crt_version: str) -> dict:
+        if self.is_fvg_dual:
+            d, cfg = self.fvg_dual, self.fvg
+            return {"kind": "fvg", "mode": "dual", "name": DUAL_STRATEGY, "profile": self.profile, "version": d.version,
+                    "engine_versions": {e: d.engine_version(e) for e in d.engines},
+                    "label": "FVG dual · M15 + M5 · 3 limits · 1:2", "reward_risk": cfg.reward_risk,
+                    "timeframes": {"engines": list(d.engines)},
+                    "rules": (f"Two independent engines (M15 and M5), each on its own closed A/B/C candles: FVG with "
+                              f"EMA{cfg.ema_fast}/{cfg.ema_slow} trend (>= {cfg.trend_min_candles} contiguous candles of "
+                              f"that timeframe), gap >= max({cfg.min_gap_ticks} ticks, {cfg.gap_atr:g} ATR{cfg.atr_period}) "
+                              f"and a {cfg.displacement_atr:g} ATR middle body. A qualified gap places three limits at "
+                              f"{'/'.join(f'{p:g}%' for p in cfg.entry_depths)} depth immediately (no retest/confirmation), "
+                              f"common SL {cfg.sl_buffer_ticks} ticks beyond the zone, each TP 1:{cfg.reward_risk:g}"),
+                    "controls": {"open_baskets_per_engine": d.max_open_baskets_per_engine,
+                                 "cooldown_minutes_per_engine": cfg.cooldown_minutes,
+                                 "max_baskets_per_bangkok_day_total": cfg.max_baskets_per_day,
+                                 "pending_expiry_minutes": cfg.pending_expiry_minutes,
+                                 "decision_max_age_seconds": cfg.max_confirmation_age_seconds,
+                                 "risk": "configured USD budget per basket (one basket per engine at once)",
+                                 "tie_order": "M15 before M5"}}
         if self.is_fvg:
             cfg = self.fvg
             return {"kind": "fvg", "name": FVG_STRATEGY, "profile": self.profile, "version": cfg.version,
@@ -96,8 +129,11 @@ def parse_active_strategy(raw: dict) -> ActiveStrategy:
         return ActiveStrategy("crt")
     if kind == "fvg":
         profile = raw.get("profile")
+        if profile == "dual":
+            dual = DUAL_PROFILE.validate()
+            return ActiveStrategy("fvg", "dual", fvg=dual.rules, fvg_dual=dual)
         if profile not in FVG_PROFILES:
-            raise ValueError(f"unknown FVG profile {profile!r}; use one of {', '.join(FVG_PROFILES)}")
+            raise ValueError(f"unknown FVG profile {profile!r}; use one of {', '.join(FVG_PROFILES)} or dual")
         return ActiveStrategy("fvg", profile, fvg=FVG_PROFILES[profile].validate())
     profile = raw.get("profile")
     if profile not in PROFILES:
@@ -128,7 +164,7 @@ def save_active_strategy(choice: dict, path: Path = ACTIVE_STRATEGY_FILE) -> Act
 
 
 def main(argv=None) -> int:
-    """python -m app.active_strategy [crt | fastsweep rr1|rr2 | fvg rr2]  (shows the current choice without args)."""
+    """python -m app.active_strategy [crt | fastsweep rr1|rr2 | fvg rr2|dual]  (shows the current choice without args)."""
     import sys
     args = list(sys.argv[1:] if argv is None else argv)
     if not args:

@@ -4,14 +4,14 @@ Project folder: `vc_trade`.
 
 A local Windows tool that analyses **one gold symbol** from **your own logged-in Exness MetaTrader 5 terminal** (read-only)
 for a CRT range-sweep setup with one SMC structure confirmation. It shows the live market, setups and signals on a dashboard and,
-only after you explicitly enable it, posts alerts to your Telegram destination. A fictional demo fixture remains available as a
-separate, clearly labelled mode.
+only after you explicitly enable it, posts alerts to your Telegram destination. It is MT5-only: there is no fictional demo
+mode or sample data.
 
 > **CRT-SMC-v1 and FastSweep never trade.** They are read-only: alerts plus *simulated* outcomes (price hits, not broker fills).
 > The separate, opt-in **FVG-Trend-M15-M5** build can place pending limit orders through `app/fvg_execution.py` (the only module
 > that sends broker requests), but only while FVG is the active strategy on live MT5 **and** you have explicitly turned its
 > automatic execution ON for that exact source/symbol/account/strategy version. It is **OFF by default and is not active.**
-> CRT-SMC-v1 is a research baseline with testing-default thresholds. It is **not** a proven or profitable strategy, and demo prices are fictional.
+> CRT-SMC-v1 is a research baseline with testing-default thresholds. It is **not** a proven or profitable strategy.
 
 ## Quick start
 
@@ -25,15 +25,15 @@ gold.cmd status
 gold.cmd stop
 ```
 
-The dashboard starts in the **data source you last selected** (Live MT5 or Demo; saved in `config/local_settings.json`).
-A live source that cannot connect stays an honest *disconnected / not configured* live state; fictional data is never substituted.
+The dashboard always uses your **MT5 terminal** (read-only). A terminal that cannot connect stays an honest
+*disconnected / not configured* state; no fictional or sample data exists in the app. A saved or environment data source of
+`demo` (from older versions) is refused at startup with a clear message - set it to `mt5` or remove it.
 External Telegram delivery is **off** unless you enabled it for the current live source/symbol/bot/destination (see Telegram).
 Logs go to `.tmp/gold-signals/server.log`, and the state/PID record is `.tmp/gold-signals/server.json`.
 
 Other commands:
 
 ```bat
-gold.cmd replay --source demo                  :: replay on the fictional fixture
 gold.cmd replay --source mt5 --days 60         :: read-only MT5 history (needs GOLD_SYMBOL)
 gold.cmd replay --source mt5 --days 30 --use-ticks
 gold.cmd replay --source csv --m5 my_m5.csv [--ticks my_ticks.csv]
@@ -102,21 +102,21 @@ The Chart section uses TradingView's open-source **Lightweight Charts™ 5.2.1**
 `frontend/package-lock.json`, bundled locally as `app/static/dist/lightweight-charts.standalone.production.js`; no CDN).
 Its NOTICE attribution is in `/static/dist/THIRD_PARTY_NOTICES.txt` (licence text: `/static/dist/LICENSE-lightweight-charts.txt`);
 the chart shows TradingView's attribution logo and the page links to https://www.tradingview.com/. It is a custom chart fed by
-VC Signal's `/api/market/bars` (your MT5 terminal or the demo fixture), not a TradingView widget, and VC Signal keeps its own branding.
+VC Signal's `/api/market/bars` (your MT5 terminal), not a TradingView widget, and VC Signal keeps its own branding.
 
 Supported functions:
 - Candlesticks with a precision-aware price axis (symbol digits/tick size), UTC time axis (or your display time zone), crosshair, and an
   OHLC/tick-volume readout outside the canvas.
 - Mouse-wheel zoom, drag-to-pan, touch gestures, **Reset view**, **Live** (return to the current market) and **Expand** (Fullscreen API,
   with an in-page expanded fallback; Esc / the button returns to the dashboard).
-- Timeframes **1m, 5m, 15m, 1h, 4h, 1d** — display only. Live mode requests the matching MT5 timeframe; missing history is shown as such.
-  Demo mode derives 15m/1h/4h/1d only from complete fixture M5 periods and reports 1m as unavailable. The strategy always uses H1 + M5.
+- Timeframes **1m, 5m, 15m, 1h, 4h, 1d** — display only. Each requests the matching MT5 timeframe; missing history is shown as such.
+  The strategy always uses H1 + M5.
 - Polling appends/updates the newest candles without moving your zoom/pan; older history loads on demand when you scroll left
   (bounded requests, no gap filling). The forming candle is drawn in a muted colour and labelled; analysis only uses closed candles.
 - Selecting a setup or signal overlays A high/low, the sweep extreme, the frozen structure level, entry, SL and TP plus B/confirmation
   markers, all taken from the backend records; **Back to live** removes them.
 - EMA20 / EMA50 toggles computed from the loaded closed bars (visual aids, not strategy rules) and a tick-volume histogram only when
-  MT5 supplies `tick_volume` (never exchange volume; disabled for the demo fixture).
+  MT5 supplies `tick_volume` (never exchange volume).
 - Light/dark colours follow the dashboard theme; responsive at desktop and ~390 px widths.
 
 ### Chart zones: FVG, IFVG, OB, BB (visual aids only)
@@ -169,7 +169,7 @@ higher-precedence source wins.
 
 | Setting | Canonical key | Accepted aliases |
 |---|---|---|
-| Data source (`demo`/`mt5`) | `GOLD_DATA_MODE` | — |
+| Data source (`mt5` only) | `GOLD_DATA_MODE` | — |
 | Exact broker symbol | `GOLD_SYMBOL` | — |
 | MT5 terminal path | `GOLD_MT5_TERMINAL_PATH` | — |
 | Telegram bot token (secret) | `GOLD_TELEGRAM_BOT_TOKEN` | `TELEGRAM_BOT_TOKEN` |
@@ -217,11 +217,10 @@ The display time zone (e.g. Asia/Bangkok) only changes how times are shown.
 4. Press **Send labeled test message** to send one TEST MESSAGE, then turn on **External delivery** when you want signals posted.
 
 Delivery is **off by default**. Enabling it in live mode saves an explicit opt-in bound to the live source, exact symbol, bot (token
-fingerprint) and destination; a restart restores it, and changing any of them invalidates it so you must re-enable. Demo enablement
-lasts for the session only. Restored opt-ins only apply to new signals — historical or expired signals are never sent.
+fingerprint) and destination; a restart restores it, and changing any of them invalidates it so you must re-enable. Restored opt-ins only apply to new signals — historical or expired signals are never sent.
 
 The token is never shown in the UI, logs, errors or database. A signal message contains exactly four emoji-labelled lines, in this order
-(prices at the symbol's precision, RR with two decimals), for live and demo alike:
+(prices at the symbol's precision, RR with two decimals):
 
 ```
 📍 Entry: <entry price>
@@ -304,9 +303,9 @@ The quote time, actual spread, symbol metadata and config version are all record
 
 ### Simulated outcomes
 
-| | Live / demo | Replay |
+| | Live | Replay |
 |---|---|---|
-| Exit prices | **Live MT5:** measured on observed ticks (bounded chronological `copy_ticks_range` reads plus the current quote) — BUY exits on Bid, SELL exits on Ask. A failed tick read is recorded as a measurement gap; no estimate replaces it. **Demo:** bar/quote estimates, labelled ESTIMATE for SELL. | Same sides |
+| Exit prices | **Live MT5:** measured on observed ticks (bounded chronological `copy_ticks_range` reads plus the current quote) — BUY exits on Bid, SELL exits on Ask. A failed tick read is recorded as a measurement gap; no estimate replaces it. | Same sides |
 | Entry fill | First fresh quote at confirmation | Next executable observation: the next M5 open with the assumed spread and slippage, or the first valid tick within 30 s after the confirmation close and inside the replay period |
 | States | pending, active, TP, SL, expired (after 24 h, configurable), ambiguous | Same |
 | Same-bar TP and SL | **AMBIGUOUS**, excluded from the win rate | Same |
@@ -396,7 +395,7 @@ Code: `app/fvg.py` (rules), `app/fvg_orders.py` (sizing), `app/fvg_execution.py`
   retried (every 30 s, after re-reading the broker's current pending orders) until the broker shows none left. An
   unreadable order list counts as unknown, never as "none", and a removal that already succeeded is not repeated.
 - **Execution switch:** System -> *FVG automatic execution* (or `POST /api/fvg/execution` with `confirm: true`). Refused while FVG
-  is inactive, on demo, without risk config, with an unsupported currency or a netting account. The opt-in is bound to the
+  is inactive, without MT5, without risk config, with an unsupported currency or a netting account. The opt-in is bound to the
   source, symbol, a hash of the account login and the strategy version; any change turns it OFF. Telegram alerts report the plan
   and never trigger orders.
 - **Safety:** pre-checks (terminal/account trading allowed, hedging, full trade mode, fresh quote, spread <= 0.50, no existing
@@ -458,13 +457,12 @@ non-secret settings and history. Nothing for that is built or tested yet (no ser
 
 | Path | Contents |
 |---|---|
-| `app/` | Strategy rules, engine, SQLite store, scanner, MT5/demo feeds, Telegram delivery, replay, FastAPI web app, static dashboard, launcher |
+| `app/` | Strategy rules, engine, SQLite store, scanner, MT5 feed, Telegram delivery, replay, FastAPI web app, static dashboard, launcher |
 | `config/strategy.json` | Validated strategy thresholds |
-| `data/demo/xauusd_demo_m5.json` | Deterministic **fictional** fixture: valid BUY/SELL plus rejected, invalidated and expired setups. Rebuild with `python -m app.demo_fixture` |
 | `config/mt5_time.json` | Verified MT5 trade-server time offsets, bound to the exact server name |
 | `config/fvg_risk.json` | FVG fixed risk budget per setup (a preference; it does not arm execution) |
-| `tests/` | Strategy timing/rules, replay, delivery (mocked network), scanner/persistence, API, FVG execution (fake broker only) |
-| `.tmp/gold-signals/` | Databases (`demo.sqlite`, `mt5.sqlite`), logs, server record, replay results, pip cache |
+| `tests/` | Strategy timing/rules, replay, delivery (mocked network), scanner/persistence, API, FVG execution (fake broker only). Test-only fictional fixture: `tests/data/xauusd_fixture_m5.json` (rebuild with `python -m tests.fixture_gen`); `tests/conftest.py` makes every test use an offline fake instead of a real terminal |
+| `.tmp/gold-signals/` | Databases (`mt5-<symbol>.sqlite`, FVG stores and journals; an old `demo.sqlite` from earlier versions is left untouched and unused), logs, server record, replay results, pip cache |
 | `tools/`, `prompt/`, `report/` | The agent-to-agent handoff helper and its history; not part of this app |
 
 ## Security notes

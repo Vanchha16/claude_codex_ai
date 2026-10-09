@@ -8,9 +8,9 @@ from datetime import datetime, timedelta
 import httpx
 import pytest
 
-from app.config import DEMO_FIXTURE, Settings, StrategyConfig
+from app.config import Settings, StrategyConfig
 from app.data.base import FeedStatus
-from app.data.demo import DemoFeed
+from tests.fixture_feed import FIXTURE, FixtureFeed
 from app.delivery import Delivery, TelegramClient
 from app.models import UTC, Quote
 from app.scanner import Scanner
@@ -53,8 +53,8 @@ def test_restart_across_confirmation_with_persisted_history_is_not_actionable(tm
     assert first_candidate(store2).reason == "confirmation_before_session_watermark"
 
 
-class FlakyFeed(DemoFeed):
-    """Demo feed that is disconnected, or serves a stale quote, inside [down_from, down_to)."""
+class FlakyFeed(FixtureFeed):
+    """Test fixture feed that is disconnected, or serves a stale quote, inside [down_from, down_to)."""
 
     def __init__(self, path, down_from, down_to, kind):
         super().__init__(path)
@@ -77,7 +77,7 @@ class FlakyFeed(DemoFeed):
 
 @pytest.mark.parametrize("kind", ["disconnect", "stale"])
 def test_recovery_within_30_seconds_does_not_release_missed_confirmation(tmp_path, kind):
-    feed = FlakyFeed(DEMO_FIXTURE, FIRST_CONFIRM - timedelta(seconds=30), FIRST_CONFIRM + timedelta(seconds=5), kind)
+    feed = FlakyFeed(FIXTURE, FIRST_CONFIRM - timedelta(seconds=30), FIRST_CONFIRM + timedelta(seconds=5), kind)
     store = SqliteStore(tmp_path / "demo.sqlite")
     calls = []
 
@@ -85,7 +85,7 @@ def test_recovery_within_30_seconds_does_not_release_missed_confirmation(tmp_pat
         calls.append(request)
         return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
     settings = Settings(telegram_bot_token="1:x", telegram_test_chat_id="-1")
-    delivery = Delivery(store, settings, clock=feed.now,
+    delivery = Delivery(store, settings, clock=feed.now, source="test",
                         client_factory=lambda t: TelegramClient(t, transport=httpx.MockTransport(handler)))
     delivery.set_enabled(True)
     sc = Scanner(settings, CFG, feed, store, delivery)

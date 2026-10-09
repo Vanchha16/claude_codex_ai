@@ -233,6 +233,15 @@ class SqliteStore:
                 " VALUES(?,?,?,'pending',0,?,?,?,?)", (signal_id, kind, text, iso(now), iso(valid_until), iso(now), iso(now)))
         return cur.rowcount == 1
 
+    def outbox_for(self, signal_ids: list[str], kind: str) -> dict[str, dict]:
+        """Read-only: the outbox row of each given signal/basket id (one row per id and kind, by the UNIQUE key)."""
+        if not signal_ids:
+            return {}
+        marks = ",".join("?" * len(signal_ids))
+        with self._lock:
+            rows = self.db.execute(f"SELECT * FROM outbox WHERE kind=? AND signal_id IN ({marks})", [kind, *signal_ids]).fetchall()
+        return {r["signal_id"]: dict(r) for r in rows}
+
     def outbox_rows(self, status: Optional[str] = None, limit: int = 200) -> list[dict]:
         q, args = "SELECT * FROM outbox", []
         if status:

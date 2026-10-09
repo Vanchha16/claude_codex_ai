@@ -74,7 +74,9 @@ def _leg_r(b: Basket, leg: Leg, exit_px: float) -> float:
     return round(((exit_px - leg.entry) if b.direction == BUY else (leg.entry - exit_px)) / risk, 4)
 
 
-def _step_basket(b: Basket, bar: Bar, costs: Costs) -> None:
+def _step_basket(b: Basket, bar: Bar, costs: Costs, invalidate: bool = True) -> None:
+    """invalidate=False: fills/exits only; the caller applies candle-close invalidation on the basket's OWN timeframe
+    (dual engines: M15 baskets only on closed M15 candles, see app/fvg_dual.invalidate_basket)."""
     if bar.open_time < b.placed_at:
         return
     buy = b.direction == BUY
@@ -108,7 +110,7 @@ def _step_basket(b: Basket, bar: Bar, costs: Costs) -> None:
             elif sl_hit:
                 leg.outcome, leg.exit_time = "sl", bar.close_time
                 leg.r = _leg_r(b, leg, b.sl - costs.slippage if buy else b.sl + costs.slippage)
-    far_break = bar.close < b.bottom if buy else bar.close > b.top
+    far_break = invalidate and (bar.close < b.bottom if buy else bar.close > b.top)
     if far_break:  # zone invalidated: cancel only this basket's remaining unfilled legs
         for leg in b.legs:
             if leg.state == "pending":

@@ -1,8 +1,8 @@
 """FastAPI app for the local VC Signal dashboard. Loopback only; state-changing requests need the per-session token
 and a same-origin request (no CORS is enabled, Host is checked to defeat DNS rebinding).
 
-Data source: the workstation starts in the PERSISTED source (demo or live MT5). A live MT5 source that cannot connect
-stays an honest disconnected/not-configured live state; fictional data is never substituted.
+Data source: MT5 only (the user's running, logged-in terminal; read-only market data). A terminal that cannot connect
+stays an honest disconnected/not-configured state; no fictional or sample data exists in the app.
 Single owner: only the process holding .tmp/gold-signals/owner.lock runs the scanner and the Telegram sender.
 """
 from __future__ import annotations
@@ -23,9 +23,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import APP_ID
-from .config import (DEMO_FIXTURE, LOCAL_SETTINGS_FILE, PROJECT_ROOT, STATE_DIR, ConfigError, Settings, load_settings,
+from .config import (DEMO_REMOVED, LOCAL_SETTINGS_FILE, PROJECT_ROOT, STATE_DIR, ConfigError, Settings, load_settings,
                      load_strategy, save_local_settings)
-from .data.demo import DemoFeed
 from .data.mt5 import MT5Feed
 from .active_strategy import ActiveStrategy, fastsweep_version, is_fastsweep_version, load_active_strategy
 from .delivery import Delivery, format_fvg_basket, format_signal
@@ -52,13 +51,14 @@ class Workstation:
     """Owns the active feed/store/scanner/delivery for the configured data source."""
 
     def __init__(self, settings: Settings, state_dir: Path = STATE_DIR, *,
-                 feed_factory: Callable[[Settings], object] = default_feed_factory,
+                 feed_factory: Optional[Callable[[Settings], object]] = None,
                  settings_loader: Optional[Callable[[], Settings]] = None,
                  local_settings_path: Path = LOCAL_SETTINGS_FILE, delivery_client_factory=None,
                  active_strategy_loader: Callable[[], ActiveStrategy] = load_active_strategy):
         self.settings, self.state_dir = settings, state_dir
         self.active = active_strategy_loader()  # invalid selection -> fail clearly at startup
-        self.feed_factory, self.local_settings_path = feed_factory, local_settings_path
+        # resolved at call time (tests replace the module default so they can never reach a real terminal)
+        self.feed_factory, self.local_settings_path = feed_factory or default_feed_factory, local_settings_path
         self.settings_loader = settings_loader or (lambda: load_settings(local_path=local_settings_path))
         self.delivery_client_factory = delivery_client_factory
         self.cfg = load_strategy()
@@ -78,18 +78,18 @@ class Workstation:
         self.fvg_risk_path = FVG_RISK_FILE
         self.fvg_optin = ExecutionOptIn(state_dir / "fvg_execution_optin.json")
         self.fvg_execution_path = FVG_EXECUTION_FILE
-        self.fvg_user_off = state_dir / "fvg_execution_user_off.json"  # the user's explicit OFF beats the demo default
+        self.fvg_user_off = state_dir / "fvg_execution_user_off.json"  # the user's explicit OFF beats the demo-ACCOUNT default
 
     def _db_path(self, mode: str) -> Path:
-        if mode == "demo":
-            return self.state_dir / "demo.sqlite"
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", self.settings.symbol) or "no-symbol"
         return self.state_dir / f"mt5-{safe}.sqlite"  # history separated per live symbol
 
-    def start(self, mode: Optional[str] = None, fresh_demo: bool = True) -> None:
+    def start(self, mode: Optional[str] = None) -> None:
+        mode = mode or self.settings.data_mode
+        if mode != "mt5":  # fail before stopping anything: no fictional source exists any more
+            raise ValueError(DEMO_REMOVED if mode == "demo" else f"unsupported data source {mode!r}")
         with self.lock:
             self.stop()
-            mode = mode or self.settings.data_mode
             self.mode = mode
             if not self.owner.acquire():
                 holder = self.owner.holder() or {}
@@ -98,36 +98,27 @@ class Workstation:
                 return
             self.owner_error = None
             self.state_dir.mkdir(parents=True, exist_ok=True)
-            if mode == "demo":
-                path = self._db_path("demo")
-                if fresh_demo:  # demo history is fictional and replayed from the start each time
-                    for suffix in ("", "-wal", "-shm"):
-                        p = Path(str(path) + suffix)
-                        if p.exists() and p.resolve().is_relative_to(self.state_dir.resolve()):
-                            p.unlink()
-                feed = DemoFeed(DEMO_FIXTURE)
-            else:
-                feed = self.feed_factory(self.settings)
+            feed = self.feed_factory(self.settings)
             self.store = SqliteStore(self._db_path(mode))
             self.store.set_meta("config", json.dumps(self.cfg.to_dict()))
             self.store.set_meta("active_strategy", json.dumps(self.active_view()))
             self.delivery = self._make_delivery()
             fvg_kw = {}
             if self.active.is_fvg:
-                safe = "demo" if mode == "demo" else (re.sub(r"[^A-Za-z0-9._-]", "_", self.settings.symbol) or "no-symbol")
+                safe = re.sub(r"[^A-Za-z0-9._-]", "_", self.settings.symbol) or "no-symbol"
                 self.fvg_store = FvgStore(self.state_dir / f"fvg-{safe}.sqlite")
                 self.fvg_journal = ExecutionJournal(self.state_dir / f"fvg-execution-{safe}.sqlite")
                 fvg_kw = {"fvg_store": self.fvg_store, "fvg_executor_fn": self._fvg_executor,
-                          "fvg_maintenance_fn": self._fvg_maintenance, "fvg_account_fn": self._fvg_account}
+                          "fvg_maintenance_fn": self._fvg_maintenance, "fvg_account_fn": self._fvg_account,
+                          "fvg_risk_fn": lambda: load_risk_usd(self.fvg_risk_path)}
             self.scanner = Scanner(self.settings, self.cfg, feed, self.store, self.delivery, active=self.active, **fvg_kw)
-            if mode == "mt5":
-                feed.connect()
+            feed.connect()
             self.scanner.start()
             self._delivery_stop.clear()
             self._delivery_thread = threading.Thread(target=self._deliver_loop, name="gold-delivery", daemon=True)
             self._delivery_thread.start()
             state = "ON (restored explicit opt-in)" if self.delivery.enabled else "OFF"
-            label = "DEMO (fictional)" if mode == "demo" else f"LIVE MT5 ({self.settings.symbol or 'symbol not selected'})"
+            label = f"LIVE MT5 ({self.settings.symbol or 'symbol not selected'})"
             self.store.add_event("app", f"VC Signal started: {label}; strategy {self.active_view()['version']}; "
                                         f"external delivery {state}")
 
@@ -136,6 +127,10 @@ class Workstation:
 
     def strategy_view(self) -> dict:
         """Parameters of the ACTIVE strategy (CRT: config/strategy.json; FastSweep: its fixed profile)."""
+        if self.active.is_fvg_dual:
+            d = self.active.fvg_dual
+            return {"version": d.version, "mode": "dual", "engine_versions": {e: d.engine_version(e) for e in d.engines},
+                    "scopes": d.scopes(), **asdict(d.rules)}
         if self.active.is_fvg:
             return {"version": self.active.fvg.version, **asdict(self.active.fvg)}
         if self.active.is_fastsweep:
@@ -170,7 +165,9 @@ class Workstation:
     def _fvg_binding(self, account) -> dict:
         # canonical server+login identity: legacy login-only opt-ins never match (fail closed, need new arming)
         return {"source": self.mode, "symbol": self.settings.symbol, "account": account_id(account),
-                "strategy_version": self.active.fvg.version if self.active.is_fvg else None}
+                # the dual mode binds to its own version (new consent); plain v1 objects bind to the profile version
+                "strategy_version": getattr(self.active, "fvg_version", None) or
+                                    (self.active.fvg.version if self.active.is_fvg else None)}
 
     def _fvg_default_on_demo(self) -> bool:
         try:
@@ -249,6 +246,17 @@ class Workstation:
         if not self.active.is_fvg:
             out["reason"] = "FVG is not the active strategy (inactive build)"
             return out
+        out["strategy_version"] = self.active.fvg_version
+        if self.active.is_fvg_dual:
+            out["mode"] = "dual"
+            out["risk_scope"] = "per basket"
+            out["max_concurrent_risk_usd"] = None if risk is None else 2 * risk
+            eng = self.scanner.engine if self.scanner else None
+            if eng is not None and getattr(eng, "dual", False):
+                try:
+                    out["dual"] = eng.state_summary(self.scanner.feed.now())
+                except Exception as exc:  # status must never fail because of a store read
+                    out["dual_error"] = f"{type(exc).__name__}: {exc}"
         if self.mode != "mt5":
             out["reason"] = "automatic execution needs the live MT5 source"
             return out
@@ -268,6 +276,8 @@ class Workstation:
                 out["risk_pct_of_equity"] = round(100 * risk / (account.equity / units), 2)
         out["account_type"] = {0: "demo", 1: "contest", 2: "real"}.get(getattr(account, "trade_mode", None), "unknown")
         armed, why, how = self._fvg_armed(account, mt5)
+        if armed and how == "you" and saved:
+            out["approval"] = saved.get("approval")
         if armed:
             out["auto_execution"] = "ON" if risk is not None else "OFF"
             out["armed_by"] = how
@@ -283,12 +293,16 @@ class Workstation:
         if not self.active.is_fvg:
             return (f"disabled: {self.active_view().get('label') or self.active.kind} is alert-only with simulated outcomes "
                     "(no orders are sent); FVG automatic execution is OFF and FVG is not the active strategy")
+        if f.get("auto_execution") == "ON" and self.active.is_fvg_dual:
+            return (f"ENABLED: FVG dual automatic execution is ON - each engine (M15, M5) places 3 pending limit orders "
+                    f"when its own FVG qualifies ({f.get('risk_usd')} USD planned SL risk per basket, at most one basket "
+                    f"per engine = {2 * (f.get('risk_usd') or 0):g} USD concurrent) on this MT5 account")
         if f.get("auto_execution") == "ON":
             return (f"ENABLED: FVG automatic execution is ON - each new eligible FVG setup places 3 pending limit orders "
                     f"(fixed {f.get('risk_usd')} USD total planned SL risk) on this MT5 account")
         return f"disabled: FVG automatic execution is OFF ({f.get('reason') or 'not armed'}) - alerts only, no orders are sent"
 
-    def fvg_arm(self, enabled: bool) -> dict:
+    def fvg_arm(self, enabled: bool, approval: Optional[str] = None) -> dict:
         if not enabled:
             self.fvg_optin.disarm()  # stops NEW submissions; accepted orders keep their broker SL/TP
             self.fvg_user_off.parent.mkdir(parents=True, exist_ok=True)
@@ -307,7 +321,7 @@ class Workstation:
             raise ValueError("account currency is not supported for the USD risk budget")
         if account.margin_mode != getattr(mt5, "ACCOUNT_MARGIN_MODE_RETAIL_HEDGING", 2):
             raise ValueError("three independent targets need a hedging account; netting is not supported")
-        self.fvg_optin.arm(self._fvg_binding(account), datetime.now(UTC))
+        self.fvg_optin.arm(self._fvg_binding(account), datetime.now(UTC), approval=approval)
         try:
             self.fvg_user_off.unlink()
         except FileNotFoundError:
@@ -390,7 +404,7 @@ def _cand_dict(c, cid=None) -> dict:
 
 
 def create_app(settings: Optional[Settings] = None, *, state_dir: Path = STATE_DIR, autostart: bool = True,
-               extra_hosts: tuple[str, ...] = (), feed_factory: Callable[[Settings], object] = default_feed_factory,
+               extra_hosts: tuple[str, ...] = (), feed_factory: Optional[Callable[[Settings], object]] = None,
                settings_loader: Optional[Callable[[], Settings]] = None,
                local_settings_path: Path = LOCAL_SETTINGS_FILE, delivery_client_factory=None,
                active_strategy_loader: Callable[[], ActiveStrategy] = load_active_strategy) -> FastAPI:
@@ -403,7 +417,7 @@ def create_app(settings: Optional[Settings] = None, *, state_dir: Path = STATE_D
     @asynccontextmanager
     async def lifespan(_app):
         if autostart:
-            ws.start()  # the persisted/configured source; never forced to demo
+            ws.start()  # MT5 only
         yield
         ws.shutdown()
 
@@ -472,17 +486,12 @@ def create_app(settings: Optional[Settings] = None, *, state_dir: Path = STATE_D
             meta = feed.meta().to_dict()
         except Exception:
             pass
-        demo = None
-        if ws.mode == "demo":
-            demo = {"sim_time": iso(feed.now()), "fixture_end": iso(feed.end), "speed": ws.settings.demo_speed,
-                    "finished": feed.finished}
         feed_state = sc.state["feed"] or {}
         fvg = ws.fvg_status()
         return {
             "mode": ws.mode,
-            "data_label": ("DEMO - fictional fixture prices on a simulated clock" if ws.mode == "demo"
-                           else "LIVE - MetaTrader 5 terminal data (read-only)"),
-            "provider": (feed_state.get("details") or {}).get("provider") or ("demo fixture" if ws.mode == "demo" else "MetaTrader 5"),
+            "data_label": "MetaTrader 5 terminal data (read-only)",
+            "provider": (feed_state.get("details") or {}).get("provider") or "MetaTrader 5",
             "account": (feed_state.get("details") or {}).get("account"),
             "symbol": meta, "configured_symbol": ws.settings.symbol or None,
             "timeframes": ws.active_view()["timeframes"], "active_strategy": ws.active_view(),
@@ -492,7 +501,7 @@ def create_app(settings: Optional[Settings] = None, *, state_dir: Path = STATE_D
                         "live_start": store.get_meta("live_start"), "last_closed": sc.state.get("last_closed"),
                         "session_watermark": iso(sc.session_watermark)},
             "strategy_state": sc.strategy_state(),
-            "feed": sc.state["feed"], "quote": sc.state["quote"], "demo": demo,
+            "feed": sc.state["feed"], "quote": sc.state["quote"],
             "telegram": ws.delivery.status() if ws.delivery else None,
             "strategy": ws.strategy_view(), "crt_strategy": ws.cfg.to_dict(), "setup": setup_view(),
             "fvg": fvg,
@@ -598,7 +607,7 @@ def create_app(settings: Optional[Settings] = None, *, state_dir: Path = STATE_D
         restart_keys = ("data_mode", "symbol", "mt5_terminal_path")
         if any(getattr(before, k) != getattr(new, k) for k in restart_keys):
             # new source/symbol: a NEW scanner session (fresh watermark); history stays in its own per-symbol database
-            ws.start(new.data_mode, fresh_demo=(new.data_mode == "demo" and before.data_mode != "demo"))
+            ws.start(new.data_mode)
             action = "restarted with a new scanner session"
         elif before.telegram_test_chat_id != new.telegram_test_chat_id:
             ws.reconfigure_delivery()
@@ -654,9 +663,9 @@ def create_app(settings: Optional[Settings] = None, *, state_dir: Path = STATE_D
             probe.shutdown()
 
     @app.get("/api/replay")
-    def replay_result(source: str = "demo", strategy: str = "crt"):
-        if source not in ("demo", "mt5", "csv"):
-            raise HTTPException(400, "bad source")
+    def replay_result(source: str = "mt5", strategy: str = "crt"):
+        if source not in ("mt5", "csv"):
+            raise HTTPException(400, "source must be mt5 or csv (the fictional demo source was removed)")
         if strategy not in ("crt", "fastsweep"):
             raise HTTPException(400, "strategy must be crt or fastsweep")
         if strategy == "fastsweep":
@@ -678,45 +687,32 @@ def create_app(settings: Optional[Settings] = None, *, state_dir: Path = STATE_D
             body = await request.json()
         except Exception:
             body = {}
-        source = (body or {}).get("source", "demo")
+        source = (body or {}).get("source", "mt5")
         days = int((body or {}).get("days", REPLAY_MAX_DAYS))
         use_ticks = bool((body or {}).get("use_ticks", False))
         strategy = (body or {}).get("strategy", "crt")
         profile = (body or {}).get("profile") or (ws.active.profile if ws.active.is_fastsweep else "rr2")
-        if source not in ("demo", "mt5"):
-            raise HTTPException(400, "source must be demo or mt5")
+        if source != "mt5":
+            raise HTTPException(400, "source must be mt5 (the fictional demo source was removed)")
         if strategy not in ("crt", "fastsweep"):
             raise HTTPException(400, "strategy must be crt or fastsweep")
         if strategy == "fastsweep":
             from .fastsweep import PROFILES
             if profile not in PROFILES:
                 raise HTTPException(400, "profile must be rr1 or rr2")
-            if source != "mt5":
-                raise HTTPException(400, "FastSweep replay runs on real MT5 history only")
         if not 1 <= days <= REPLAY_MAX_DAYS:
             raise HTTPException(400, f"days must be 1-{REPLAY_MAX_DAYS}")
         if ws.replay_running:
             raise HTTPException(409, "a replay is already running")
-        if source == "mt5":
-            _, sc = need_store()
-            if ws.mode != "mt5" or not (sc.state.get("feed") or {}).get("ok"):
-                raise HTTPException(400, "Real replay needs the live MT5 source connected with an exact symbol selected")
+        _, sc = need_store()
+        if not (sc.state.get("feed") or {}).get("ok"):
+            raise HTTPException(400, "Replay needs MT5 connected with an exact symbol selected")
 
         def work():
             ws.replay_running, ws.replay_error = True, None
             try:
                 if strategy == "fastsweep":
                     _fastsweep_replay(days, profile)
-                elif source == "demo":
-                    from .replay import main as replay_main
-                    out = ws.state_dir / "replays"
-                    out.mkdir(parents=True, exist_ok=True)
-                    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-                    target = out / f"replay-demo-{stamp}.json"
-                    replay_main(["--source", "demo", "--out", str(target)])
-                    tmp = out / "latest-demo.tmp"
-                    tmp.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
-                    os.replace(tmp, out / "latest-demo.json")
                 else:
                     from .replay import replay_from_feed
                     result = replay_from_feed(ws.scanner.feed, ws.cfg, days=days, use_ticks=use_ticks,
@@ -766,19 +762,103 @@ def create_app(settings: Optional[Settings] = None, *, state_dir: Path = STATE_D
             os.replace(tmp, path)
 
     @app.get("/api/fvg")
-    def fvg_view(limit: int = 50):
+    def fvg_view(limit: int = 50, engine: Optional[str] = None):
+        """engine (optional): "M15" | "M5" | "legacy" - partitioned by STORED provenance (engine + engine version)
+        BEFORE the limit, so one engine's history never crowds out the other's. Without it: all baskets (unchanged)."""
+        if engine not in (None, "M15", "M5", "legacy"):
+            raise HTTPException(400, "engine must be M15, M5 or legacy")
         status = ws.fvg_status()
         if not ws.active.is_fvg or ws.fvg_store is None:
             return {"status": status, "baskets": [], "setups": []}
         now = ws.scanner.feed.now() if ws.scanner else datetime.now(UTC)
-        baskets = ws.fvg_store.baskets(limit=min(limit, 500))
+        limit = max(1, min(limit, 500))
+        if engine is None:
+            baskets = ws.fvg_store.baskets(limit=limit)
+        else:
+            def mine(b):
+                e, v = b.get("engine"), str(b.get("version") or "")
+                if engine == "legacy":
+                    return not (e in ("M15", "M5") and v.startswith(f"FVG-Immediate-{e}-"))
+                return e == engine and v.startswith(f"FVG-Immediate-{engine}-")
+            baskets = [b for b in ws.fvg_store.baskets(limit=100000) if mine(b)][:limit]
+        sent = ws.store.outbox_for([b["id"] for b in baskets], "fvg_basket") if ws.store else {}
         for b in baskets:
             b["open"] = basket_is_open(b, now)
             b["preview"] = format_fvg_basket(b)
+            row = sent.get(b["id"])
+            # this basket's OWN Telegram state and its exact queued text (no secrets, no error details)
+            b["delivery"] = None if row is None else {"status": row["status"], "attempts": row["attempts"],
+                                                      "updated_at": row["updated_at"], "valid_until": row["valid_until"]}
+            b["message"] = ({"source": "queued", "text": row["text"]} if row is not None else
+                            {"source": "preview", "text": b["preview"]})
         setups = [{"key": x.key, "direction": x.direction, "bottom": x.bottom, "top": x.top, "c_close": iso(x.c_close),
                    "expires": iso(x.expires), "status": x.status, "reason": x.reason, "retest_close": iso(x.retest_close),
-                   "level": x.level, "confirm_close": iso(x.confirm_close)} for x in ws.fvg_store.list_setups(min(limit, 500))]
+                   "level": x.level, "confirm_close": iso(x.confirm_close), "engine": (x.meta or {}).get("engine"),
+                   "basket": (x.meta or {}).get("basket")} for x in ws.fvg_store.list_setups(min(limit, 500))]
         return {"status": status, "baskets": baskets, "setups": setups}
+
+    @app.get("/api/fvg/guide")
+    def fvg_guide(key: Optional[str] = None, limit: int = 30):
+        """READ-ONLY FVG Guide data: recorded setups, the selected one's step evidence and a bounded candle window.
+        Never creates/changes setups or baskets and never calls a broker (candles come from the feed's history)."""
+        from . import fvg_guide as guide
+        from .fvg import PROFILES
+        status = ws.fvg_status()
+        cfg = ws.active.fvg if ws.active.is_fvg else PROFILES["rr2"]
+        dual = ws.active.fvg_dual if ws.active.is_fvg_dual else None
+        current = ({dual.version, *(dual.engine_version(e) for e in dual.engines)} if dual else {cfg.version})
+        sc = ws.scanner
+        now = sc.feed.now() if sc else datetime.now(UTC)
+        feed_state = (sc.state.get("feed") if sc else None) or {}
+        quote = (sc.state.get("quote") if sc else None) or {}
+        out = {"now": iso(now), "status": status, "fvg_active": bool(ws.active.is_fvg), "mode": ws.mode,
+               "strategy_mode": "dual" if dual else ("legacy_v1" if ws.active.is_fvg else None),
+               "display_timezone": ws.settings.display_timezone, "config": guide.config_view(cfg),
+               "scopes": dual.scopes() if dual else None,
+               "feed_ok": bool(feed_state.get("ok")), "quote_fresh": bool(quote.get("fresh")),
+               "scanner_paused": bool(sc and sc.paused), "records": [], "selected": None}
+        if not ws.active.is_fvg or ws.fvg_store is None:
+            out["message"] = "FVG is not the active strategy, so there are no live FVG records to explain."
+            return out
+        setups = ws.fvg_store.list_setups(min(max(limit, 1), 200))
+        if key:
+            # an EXPLICIT key is resolved directly from storage (never limited to the recent selector window) and is
+            # never substituted: a missing record is reported as missing
+            chosen = ws.fvg_store.get_setup(key)
+            if chosen is None:
+                out["records"] = [guide.record_dict(s, current) for s in setups]
+                out["missing_key"] = key
+                out["message"] = "The requested setup was not found in this store; no other setup is shown in its place."
+                return out
+            if all(s.key != chosen.key for s in setups):
+                setups = [chosen] + setups  # keep the selected record in the selector, once
+        elif not setups:
+            out["message"] = "No FVG setups have been recorded yet."
+            return out
+        else:
+            chosen = next((s for s in setups if s.status in ("pending", "retested", "qualified")), setups[0])
+        out["records"] = [guide.record_dict(s, current) for s in setups]
+        basket = ws.fvg_store.basket_for_setup(chosen.key)  # the stored relationship, not a recency window
+        is_dual = guide.is_dual_record(chosen)
+        m5 = []
+        try:
+            meta = sc.feed.meta() if sc else None
+        except Exception:
+            meta = None  # never invent tick size/digits: the guide then says the preview is unavailable
+        if sc and feed_state.get("ok"):
+            end_at = chosen.c_close + timedelta(hours=2) if is_dual else chosen.expires
+            if basket and basket.get("pending_expires"):
+                end_at = max(end_at, parse_iso(basket["pending_expires"]))
+            start, end = chosen.a_open - timedelta(minutes=15), min(now, end_at)
+            if end - start <= timedelta(hours=6) and end > start:
+                try:
+                    with sc._feed_lock:
+                        m5 = sc.feed.bars_range("M5", start, end)
+                except Exception:
+                    m5 = []
+        out["selected"] = (guide.dual_record_view(chosen, basket, m5, cfg, meta, now, current) if is_dual else
+                           guide.record_view(chosen, basket, m5, cfg, meta, now))
+        return out
 
     @app.post("/api/fvg/execution")
     async def fvg_execution(request: Request):
@@ -789,8 +869,10 @@ def create_app(settings: Optional[Settings] = None, *, state_dir: Path = STATE_D
         enabled = bool((body or {}).get("enabled"))
         if enabled and (body or {}).get("confirm") is not True:
             raise HTTPException(400, "arming automatic execution needs an explicit confirm: true")
+        approval = (body or {}).get("approval")  # optional note: which user approval this consent records
+        approval = str(approval)[:300] if approval else None
         try:
-            status = ws.fvg_arm(enabled)
+            status = ws.fvg_arm(enabled, approval=approval)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         if ws.store:
@@ -820,29 +902,6 @@ def create_app(settings: Optional[Settings] = None, *, state_dir: Path = STATE_D
         except Exception as exc:
             raise HTTPException(503, ws.settings.redact(f"{action} failed: {type(exc).__name__}: {exc}"))
         return {"paused": sc.paused}
-
-    @app.post("/api/mode")
-    async def set_mode(request: Request):
-        body = await request.json()
-        mode = body.get("mode")
-        if mode not in ("demo", "mt5") or body.get("confirm") is not True:
-            raise HTTPException(400, "send {mode: 'demo'|'mt5', confirm: true}")
-        if ws.settings.env_locked("data_mode"):
-            raise HTTPException(400, "GOLD_DATA_MODE is set in the process environment")
-        try:
-            save_local_settings({"data_mode": mode}, ws.local_settings_path)  # persisted across restarts
-            ws.settings = ws.settings_loader()
-        except ConfigError as exc:
-            raise HTTPException(400, str(exc))
-        ws.start(mode)
-        return {"mode": ws.mode}
-
-    @app.post("/api/demo/restart")
-    def demo_restart():
-        if ws.mode != "demo":
-            raise HTTPException(400, "not in demo mode")
-        ws.start("demo")
-        return {"restarted": True}
 
     @app.post("/api/telegram/enabled")
     async def telegram_enabled(request: Request):

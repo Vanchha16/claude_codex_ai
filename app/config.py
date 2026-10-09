@@ -15,7 +15,8 @@ STRATEGY_FILE = PROJECT_ROOT / "config" / "strategy.json"
 ENV_FILE = PROJECT_ROOT / ".env"
 VENV_ENV_FILE = PROJECT_ROOT / ".venv" / ".env"
 LOCAL_SETTINGS_FILE = PROJECT_ROOT / "config" / "local_settings.json"  # nonsecret dashboard choices (git-ignored)
-DEMO_FIXTURE = PROJECT_ROOT / "data" / "demo" / "xauusd_demo_m5.json"
+DEMO_REMOVED = ("the fictional demo data source was removed: VC Signal is MT5-only. Set the data source to 'mt5' "
+                "(GOLD_DATA_MODE=mt5 or data_mode in config/local_settings.json)")
 
 
 class ConfigError(ValueError):
@@ -119,7 +120,6 @@ KEYS: dict[str, tuple[str, tuple[str, ...]]] = {
     "display_timezone": ("GOLD_DISPLAY_TIMEZONE", ()),
     "port": ("GOLD_PORT", ()),
     "scan_interval_seconds": ("GOLD_SCAN_INTERVAL_SECONDS", ()),
-    "demo_speed": ("GOLD_DEMO_SPEED", ()),
     "replay_spread_price": ("GOLD_REPLAY_SPREAD", ()),
     "replay_slippage_price": ("GOLD_REPLAY_SLIPPAGE", ()),
 }
@@ -131,7 +131,7 @@ CHAT_ID_RE = re.compile(r"^-?\d{5,20}$")
 
 @dataclass
 class Settings:
-    data_mode: str = "demo"  # "demo" (fictional fixture) or "mt5" (live terminal); persisted, never silently swapped
+    data_mode: str = "mt5"  # the only source: the user's running MT5 terminal (read-only market data)
     symbol: str = ""  # exact broker symbol chosen by the user; never guessed
     mt5_terminal_path: str = ""
     mt5_server_utc_offset_hours: float = 0.0  # LEGACY: MT5 Python API epochs are UTC; nonzero only if proven needed
@@ -140,7 +140,6 @@ class Settings:
     display_timezone: str = "UTC"  # display only; strategy computation is always UTC
     scan_interval_seconds: float = 5.0
     port: int = 8000
-    demo_speed: float = 60.0  # simulated seconds per real second in demo mode
     replay_spread_price: float = 0.20  # OHLC replay assumption (price units)
     replay_slippage_price: float = 0.05
     holdout_fraction: float = 0.30
@@ -194,8 +193,10 @@ def validate_local(updates: dict) -> dict:
             raise ConfigError(f"{key} cannot be set from the dashboard")
         value = "" if value is None else str(value).strip()
         if key == "data_mode":
-            if value not in ("demo", "mt5"):
-                raise ConfigError("data source must be 'demo' or 'mt5'")
+            if value == "demo":
+                raise ConfigError(DEMO_REMOVED)
+            if value != "mt5":
+                raise ConfigError("data source must be 'mt5'")
         elif key == "symbol":
             if value and not SYMBOL_RE.match(value):
                 raise ConfigError("symbol must be the exact broker symbol name (letters, digits, . _ # + -)")
@@ -272,9 +273,11 @@ def load_settings(env: dict[str, str] | None = None, *, env_files: tuple[Path, .
                   local_path: Path = LOCAL_SETTINGS_FILE) -> Settings:
     values, origins = resolve(_sources(env, env_files, local_path))
     s = Settings(origins=origins)
-    s.data_mode = (values.get("data_mode", "demo") or "demo").lower()
-    if s.data_mode not in {"demo", "mt5"}:
-        raise ConfigError("GOLD_DATA_MODE must be 'demo' or 'mt5'")
+    s.data_mode = (values.get("data_mode", "mt5") or "mt5").lower()
+    if s.data_mode == "demo":
+        raise ConfigError(DEMO_REMOVED)  # fail clearly: never run fictional data, never rewrite the user's file
+    if s.data_mode != "mt5":
+        raise ConfigError("GOLD_DATA_MODE must be 'mt5'")
     s.symbol = values.get("symbol", "")
     if s.symbol and not SYMBOL_RE.match(s.symbol):
         raise ConfigError("GOLD_SYMBOL is not a valid symbol name")
@@ -285,7 +288,6 @@ def load_settings(env: dict[str, str] | None = None, *, env_files: tuple[Path, .
     try:
         s.mt5_server_utc_offset_hours = float(values.get("mt5_server_utc_offset_hours", "0") or 0)
         s.port = int(values.get("port", "8000") or 8000)
-        s.demo_speed = float(values.get("demo_speed", "60") or 60)
         s.scan_interval_seconds = float(values.get("scan_interval_seconds", "5") or 5)
         s.replay_spread_price = float(values.get("replay_spread_price", "0.20") or 0.2)
         s.replay_slippage_price = float(values.get("replay_slippage_price", "0.05") or 0.05)
@@ -295,8 +297,6 @@ def load_settings(env: dict[str, str] | None = None, *, env_files: tuple[Path, .
         raise ConfigError("GOLD_PORT out of range")
     if not 1 <= s.scan_interval_seconds <= 300:
         raise ConfigError("GOLD_SCAN_INTERVAL_SECONDS must be 1-300")
-    if not 1 <= s.demo_speed <= 3600:
-        raise ConfigError("GOLD_DEMO_SPEED must be 1-3600")
     if abs(s.mt5_server_utc_offset_hours) > 14:
         raise ConfigError("GOLD_MT5_SERVER_UTC_OFFSET_HOURS must be within +-14")
     return s

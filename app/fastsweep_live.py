@@ -210,8 +210,7 @@ class FastSweepEngine:
             self._close(c, REJECTED, why, now)
             return None
         digest = hashlib.sha256(c.key.encode()).hexdigest()[:6].upper()
-        prefix = "DEMO-" if self.mode == "demo" else ""
-        sig = Signal(id=f"{prefix}FS-{c.b_close:%Y%m%d-%H%M}-{c.direction}-{digest}", candidate_key=c.key, symbol=self.symbol,
+        sig = Signal(id=f"FS-{c.b_close:%Y%m%d-%H%M}-{c.direction}-{digest}", candidate_key=c.key, symbol=self.symbol,
                      mode=self.mode, direction=c.direction, entry=lv.entry, sl=lv.sl, tp=lv.tp,
                      reward_risk=round(lv.reward_risk, 3), spread=round(lv.quote.spread, 6), bid=lv.quote.bid,
                      ask=lv.quote.ask, quote_time=lv.quote.time, confirm_close=c.confirm_close, created_at=now,
